@@ -1,0 +1,7 @@
+[Event "Mate del loco (partida de ejemplo)"]
+[White "Jugador A"]
+[Black "Jugador B"]
+[Result "0-1"]
+[MeaCulpaUser "white"]
+
+1. f3 e5 2. g4 Qh4# 0-1
