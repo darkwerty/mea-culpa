@@ -1,0 +1,18 @@
+[project]
+name = "mea-culpa"
+version = "0.1.0"
+description = "Entrenador de ajedrez que te explica por qué has perdido"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+pythonpath = ["backend"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["backend"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]

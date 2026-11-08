@@ -1,0 +1,24 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Datos generados en local (partidas, métricas)
+data/runtime/
+
+# Nuxt
+web/node_modules/
+web/.nuxt/
+web/.output/
+web/.data/
+web/dist/
+
+# Bicep compilado
+infra/*.json
+
+# Varios
+.env
+*.log
+.DS_Store

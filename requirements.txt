@@ -1,0 +1,6 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+chess>=1.11
+pydantic>=2.8
+openai>=3.40  # trae httpx2, que usan los tests del proveedor Azure
+azure-identity>=1.19
