@@ -20,7 +20,8 @@ RUN apt-get update \
     && dpkg -i /tmp/ms.deb && rm /tmp/ms.deb \
     && apt-get update \
     && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 unixodbc \
-    && apt-get purge -y curl && apt-get autoremove -y \
+    && apt-get purge -y curl \
+    && ! ldd /opt/microsoft/msodbcsql18/lib64/libmsodbcsql-18.*.so* | grep "not found" \
     && rm -rf /var/lib/apt/lists/* \
     && test -x /usr/games/stockfish
 
