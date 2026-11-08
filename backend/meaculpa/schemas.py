@@ -36,8 +36,9 @@ PatternId = Literal[
 
 
 class MoveProposal(BaseModel):
-    jugada: str = Field(description="Una sola jugada en notación SAN (p. ej. Nf3, exd5, O-O, e8=Q)")
-    motivo: str = Field(description="Motivo en pocas palabras (máximo 15)")
+    """Salida estructurada de una jugada: un JSON con un único campo `move`."""
+
+    move: str = Field(description="Una sola jugada en notación SAN (p. ej. Nf3, exd5, O-O, e8=Q)")
 
 
 class ErrorExplicado(BaseModel):

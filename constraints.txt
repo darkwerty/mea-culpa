@@ -2,6 +2,7 @@
 # Se regeneran con: pip install -r requirements-dev.txt azure-monitor-opentelemetry && pip freeze
 annotated-doc==0.0.5
 annotated-types==0.8.0
+anthropic==2.6.0
 anyio==4.16.0
 asgiref==3.13.0
 azure-core==1.41.0
@@ -17,6 +18,7 @@ chess==1.11.2
 click==8.5.1
 colorama==0.4.6
 cryptography==50.0.2
+docstring-parser==0.18.0
 fastapi==0.162.2
 google-auth==2.62.1
 h11==0.16.0

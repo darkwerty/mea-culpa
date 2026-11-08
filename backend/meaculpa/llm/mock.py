@@ -39,12 +39,29 @@ def _estimate_tokens(text: str) -> int:
 class MockProvider:
     kind = "mock"
 
-    def __init__(self, name: str = "mock-llm", seed: int | None = 7, illegal_base: float = 0.05) -> None:
+    supports_structured = True
+    # Temperatura que «usa» el mock cuando no se le pasa ninguna (como el valor por defecto de un proveedor).
+    DEFAULT_TEMPERATURE = 0.7
+
+    def __init__(
+        self,
+        name: str = "mock-llm",
+        seed: int | None = 7,
+        illegal_base: float = 0.05,
+        price_input_per_m: float = 0.0,
+        price_output_per_m: float = 0.0,
+    ) -> None:
         self.name = name
         self._rng = random.Random(seed)
         self.illegal_base = illegal_base
+        self.price_input_per_m = price_input_per_m
+        self.price_output_per_m = price_output_per_m
 
-    def structured(self, messages: list[dict[str, str]], schema: type[T], temperature: float) -> LLMResult[T]:
+    def structured(
+        self, messages: list[dict[str, str]], schema: type[T], temperature: float | None = None
+    ) -> LLMResult[T]:
+        if temperature is None:
+            temperature = self.DEFAULT_TEMPERATURE
         t0 = time.perf_counter()
         if schema is MoveProposal:
             parsed: object = self._move(messages, temperature)
@@ -63,6 +80,12 @@ class MockProvider:
             model=self.name,
         )
 
+    def text(self, messages: list[dict[str, str]], temperature: float | None = None) -> LLMResult[None]:
+        """Modo texto: la misma jugada que en modo estructurado, dentro de una frase."""
+        res = self.structured(messages, MoveProposal, temperature)
+        out = f"Creo que lo mejor es jugar {res.parsed.move}."  # type: ignore[union-attr]
+        return LLMResult(None, out, res.input_tokens, _estimate_tokens(out), res.latency_ms, self.name)
+
     # ------------------------------------------------------------------ jugar
     def _move(self, messages: list[dict[str, str]], temperature: float) -> MoveProposal:
         fen = extract_tag(messages[1]["content"], "fen")
@@ -72,10 +95,10 @@ class MockProvider:
         p_illegal = (self.illegal_base + 0.45 * temperature) / (1 + retries)
         legal = list(board.legal_moves)
         if self._rng.random() < p_illegal:
-            return MoveProposal(jugada=self._illegal_san(board), motivo="me parece fuerte")
+            return MoveProposal(move=self._illegal_san(board))
         captures = [m for m in legal if board.is_capture(m)]
         pick = self._rng.choice(captures) if captures and self._rng.random() < 0.6 else self._rng.choice(legal)
-        return MoveProposal(jugada=board.san(pick), motivo="desarrollo y presión")
+        return MoveProposal(move=board.san(pick))
 
     def _illegal_san(self, board: chess.Board) -> str:
         options = ["Ke9", "Qxh9", "O-O-O-O", "e5e4e3"]
@@ -140,15 +163,36 @@ class ScriptedProvider:
 
     kind = "scripted"
 
-    def __init__(self, moves: list[str | None], name: str = "scripted") -> None:
+    def __init__(
+        self,
+        moves: list[str | None],
+        name: str = "scripted",
+        supports_structured: bool = True,
+        price_input_per_m: float = 0.0,
+        price_output_per_m: float = 0.0,
+    ) -> None:
         self._moves = list(moves)
         self.name = name
+        self.supports_structured = supports_structured
+        self.price_input_per_m = price_input_per_m
+        self.price_output_per_m = price_output_per_m
         self.calls: list[list[dict[str, str]]] = []
+        self.temperatures: list[float | None] = []
 
-    def structured(self, messages: list[dict[str, str]], schema: type[T], temperature: float) -> LLMResult[T]:
+    def structured(
+        self, messages: list[dict[str, str]], schema: type[T], temperature: float | None = None
+    ) -> LLMResult[T]:
         self.calls.append([dict(m) for m in messages])
+        self.temperatures.append(temperature)
         nxt = self._moves.pop(0) if self._moves else None
         if nxt is None:  # simula salida que no cumple el esquema
             return LLMResult(None, "blah", 10, 2, 1.0, self.name, error="no cumple el esquema")
-        parsed = MoveProposal(jugada=nxt, motivo="test")
+        parsed = MoveProposal(move=nxt)
         return LLMResult(parsed, parsed.model_dump_json(), 10, 5, 1.0, self.name)  # type: ignore[arg-type]
+
+    def text(self, messages: list[dict[str, str]], temperature: float | None = None) -> LLMResult[None]:
+        """En modo texto, cada elemento del guion es la respuesta completa del modelo."""
+        self.calls.append([dict(m) for m in messages])
+        self.temperatures.append(temperature)
+        nxt = self._moves.pop(0) if self._moves else None
+        return LLMResult(None, nxt or "", 10, 5, 1.0, self.name)

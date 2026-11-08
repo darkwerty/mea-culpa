@@ -61,7 +61,7 @@ class OpponentConfig(BaseModel):
     type: Literal["random", "greedy", "minimax", "stockfish", "llm"]
     depth: int = Field(3, ge=1, le=4)
     skill: int = Field(5, ge=0, le=20)
-    temperature: float = Field(0.7, ge=0.0, le=2.0)
+    temperature: float | None = Field(None, ge=0.0, le=2.0)  # None = valor por defecto del proveedor
     show_legal_moves: bool = False
 
 

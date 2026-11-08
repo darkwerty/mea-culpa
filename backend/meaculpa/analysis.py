@@ -398,7 +398,7 @@ def diagnose(
     pgn: str,
     result_text: str,
     history: dict[str, Any],
-    temperature: float = 0.2,
+    temperature: float | None = None,  # None = no se envía (valor por defecto del proveedor)
     settings: Settings | None = None,
 ) -> DiagnosisResult:
     settings = settings or get_settings()

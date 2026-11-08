@@ -25,7 +25,7 @@ El script de evaluación está listo para repetirse contra un modelo real de Fou
 
 | Qué | Resultado |
 |---|---|
-| Tests | **90 tests en verde** (`pytest`): validación de jugadas, reintentos/fallback, mates en 1 y 2, detección de errores, validación de la salida del LLM, API, cliente de Azure con red simulada, login con Google (tokens firmados de prueba), aislamiento entre usuarios, cuotas y almacén Blob simulado |
+| Tests | **135 tests en verde** (`pytest`; 134 + 1 que solo corre con Stockfish instalado): validación de jugadas, reintentos/fallback, modo experimento (derrota por ilegalidad), tope de gasto, extracción de jugadas en texto, proveedores Azure OpenAI, Claude en Foundry y Ollama con red simulada, Stockfish como ancla, aperturas, Elo por máxima verosimilitud y torneo de punta a punta, mates en 1 y 2, detección de errores, validación de la salida del LLM, API, cliente de Azure con red simulada, login con Google (tokens firmados de prueba), aislamiento entre usuarios, cuotas y almacén Blob simulado |
 | Detección de errores en partidas históricas | En las miniaturas, la mayor caída del motor es el error clásico: **5…Bxd1??** en el mate de Légal, **2.g4??** en el mate del loco, **3…Nf6??** en el del pastor. En las partidas largas, el alfa-beta a profundidad 3 no siempre coincide con el análisis histórico (en la Siempreviva marca 7…d3 y no 19…Qxf3); con Stockfish sería más fiable |
 | Jugadas ilegales del LLM (mock) | 4,8 % a temperatura 0 · 24,5 % a 0,7 · 48,1 % a 1,2 — sin una sola jugada ilegal en el tablero gracias a la validación con python-chess |
 | Coste por diagnóstico | ~750 tokens de entrada + ~200 de salida ≈ **0,0005 $** con precios tipo gpt-4.1-mini (estimado; configurable) |
@@ -166,12 +166,29 @@ LLM_PROVIDER=azure
 AZURE_OPENAI_ENDPOINT=https://<tu-recurso>.openai.azure.com/
 AZURE_OPENAI_DEPLOYMENT=<nombre-del-deployment>
 # Opcionales
+AZURE_AUTH=default               # default (DefaultAzureCredential) | cli (AzureCliCredential) | key
 AZURE_OPENAI_API_VERSION=        # vacío = API v1 (/openai/v1/), recomendado; o p. ej. 2024-10-21 para el cliente clásico
 AZURE_OPENAI_API_KEY=            # solo si no puedes usar Entra ID
+AZURE_OPENAI_REASONING_EFFORT=   # none | low | medium | high (vacío = no se envía)
+LLM_MAX_TOKENS=                  # vacío = no se envía (va como max_completion_tokens)
 AZURE_OPENAI_SUPPORTS_TEMPERATURE=true   # false para modelos de razonamiento que no aceptan temperature
 LLM_PRICE_INPUT_PER_M=0.40       # USD por millón de tokens, para calcular el coste
 LLM_PRICE_OUTPUT_PER_M=1.60
 ```
+
+La temperatura **no se envía por defecto** (se usa la del proveedor); solo viaja si se elige explícitamente
+(el deslizador de la demo, `--temps` en `evaluate.py` o `temperatura` en un experimento).
+
+Otros proveedores (`LLM_PROVIDER`):
+
+| Proveedor | Variables |
+|---|---|
+| `claude` (Claude en Foundry, Messages API de Anthropic con el SDK `anthropic.AnthropicFoundry`) | `ANTHROPIC_FOUNDRY_RESOURCE` (→ `https://<recurso>.services.ai.azure.com/anthropic`) o `ANTHROPIC_FOUNDRY_BASE_URL`; `ANTHROPIC_FOUNDRY_DEPLOYMENT` (nombre del deployment, va en `model`); Entra ID con `AZURE_AUTH=cli\|default` (ámbito `https://ai.azure.com/.default`, rol *Cognitive Services User*) o `ANTHROPIC_FOUNDRY_API_KEY`; opcional `ANTHROPIC_FOUNDRY_EFFORT` (low…max) y `LLM_MAX_TOKENS` (4096 por defecto). Nunca envía `temperature`, `top_p` ni `top_k` (Haiku/Sonnet 5.5 devuelven 400). |
+| `ollama` (local, API compatible con OpenAI) | `OLLAMA_BASE_URL` (por defecto `http://localhost:11434/v1`), `OLLAMA_MODEL`. Sin coste. |
+
+La jugada se pide en salida estructurada (`{"move": "<SAN>"}`) si el modelo la admite; si no (o si el
+servidor rechaza `response_format`), se pide en texto terminado en «Jugada: <SAN>», se extrae con una
+expresión regular y se valida igual con python-chess.
 
 El proveedor (`backend/meaculpa/llm/azure.py`) usa el SDK oficial `openai`: con la API v1, el cliente `OpenAI` con
 `base_url={endpoint}/openai/v1/`; con `api-version`, el cliente `AzureOpenAI`. La autenticación por defecto es
@@ -208,6 +225,32 @@ miniaturas de ejemplo; todas de dominio público) mide:
 
 Escribe la tabla en `eval/resultados_<proveedor>.md`. En mock la coincidencia es 100 % por construcción (el mock elige
 siempre la mayor caída); el número interesante saldrá al ejecutarlo contra uno o varios deployments de Foundry.
+
+### Experimento de Elo (`backend/scripts/experiment.py`)
+
+Torneo configurable (YAML o JSON; ejemplo completo en [`eval/experimentos/ejemplo.yaml`](eval/experimentos/ejemplo.yaml))
+de participantes —motores, deployments de Azure OpenAI/Foundry, Claude en Foundry, modelos de Ollama— contra
+**anclas de Elo fijo** (Stockfish con `UCI_LimitStrength` + `UCI_Elo` 1320/1468/1608…, un proceso por partida,
+`Threads=1`, hash pequeño, límite constante por nodos o por tiempo).
+
+```bash
+export STOCKFISH_PATH="C:/.../stockfish-windows-x86-64-universal.exe"   # o 'stockfish' en el PATH
+.venv/Scripts/python backend/scripts/experiment.py eval/experimentos/ejemplo.yaml --dry-run   # sin llamadas
+.venv/Scripts/python backend/scripts/experiment.py eval/experimentos/ejemplo.yaml             # juega
+```
+
+- **Modo experimento del LLM**: agotar los reintentos es **derrota por ilegalidad** (no juega el codicioso, que
+  sigue siendo el respaldo solo en la demo). Por jugada se guardan intentos, ilegales, tokens, latencia y coste.
+- **Posiciones no famosas**: cada partida arranca tras 4–8 plies de una partida amateur real (las de Chess.com de
+  Daniel), sin repetir y con los dos colores por posición. Los rivales salen solo como «rival (Elo N)».
+- **Fin de partida**: `board.outcome(claim_draw=True)` o tope de 300 plies (tablas, contadas aparte). Un error de
+  API anula la partida (`*`), nunca son tablas en silencio; tres seguidos detienen el experimento.
+- **Tope de gasto duro** (`presupuesto_usd`): cada llamada reserva su peor caso (entrada estimada + `max_tokens`)
+  antes de hacerse; si no cabe, el experimento se para. Relanzar con la misma salida continúa donde se quedó.
+- **Salida**: `pgn/<id>.pgn` y `partidas.pgn`, `partidas.jsonl` (una fila por partida), `jugadas_llm.jsonl` (una por
+  jugada del LLM), `aperturas.json` y `resultados.md` con el **Elo por máxima verosimilitud contra las anclas e
+  IC 95 % por bootstrap** (no se da cifra con 0 % o 100 % de puntos), derrotas por ilegal, tablas por tope,
+  ilegales por 100 propuestas, legal a la primera, tokens y coste por jugada y latencia p50/p95.
 
 ## Infraestructura y despliegue
 
@@ -303,7 +346,8 @@ al LLM, los 10K TPM del deployment y el escalado máximo a 1 réplica. (El Stora
 - **No se ha probado contra Azure real**: ni el modelo de Foundry, ni el despliegue Bicep, ni Blob Storage, ni el
   login con un cliente OAuth real (los tests usan tokens firmados con una clave de prueba). La imagen Docker sí se
   construye y arranca en local. Las cifras de calidad del LLM están por medir.
-- Stockfish no estaba instalado en el equipo de desarrollo: el rival y el analizador con Stockfish están escritos pero sin probar.
+- Stockfish 19 ya está instalado (winget) y el ancla del experimento se ha probado con él; el rival de la demo y el analizador con Stockfish siguen sin probar a fondo. Winget no creó el alias `stockfish` en `%LOCALAPPDATA%/Microsoft/WinGet/Links`: hay que definir `STOCKFISH_PATH`.
+- Los proveedores Azure OpenAI y Claude en Foundry solo se han probado con red simulada; Ollama, contra un servidor local real.
 - El análisis con el motor propio puede tardar ~30 s en partidas largas; se podría paralelizar por posiciones o pasar a Stockfish.
 - Las métricas de jugadas ilegales del LLM (`llm_moves.jsonl`) siguen en disco local: en Container Apps se pierden
   al escalar a cero. No contienen datos de usuarios.
@@ -317,8 +361,11 @@ al LLM, los 10K TPM del deployment y el escalado máximo a 1 réplica. (El Stora
 
 ```
 backend/meaculpa/
-  engines/        evaluación (material + PST), alfa-beta, rivales clásicos, detección de Stockfish
-  llm/            interfaz, proveedor Azure/Foundry, mock
+  engines/        evaluación (material + PST), alfa-beta, rivales clásicos, Stockfish (rival y ancla de Elo)
+  llm/            interfaz, Azure OpenAI/Foundry, Claude en Foundry, Ollama, mock
+  experiment.py   torneo contra anclas: calendario, partidas, PGN/JSONL, informe
+  elo.py          Elo por máxima verosimilitud + IC por bootstrap
+  openings.py     posiciones iniciales de partidas reales
   llm_player.py   rival LLM: validación, reintentos, fallback, métricas
   analysis.py     análisis mea culpa: evaluaciones, caídas, etiquetas, diagnóstico y validación
   prompts.py      prompts y saneado de datos no fiables
@@ -330,7 +377,7 @@ backend/meaculpa/
   main.py         API FastAPI
 backend/dev_server.py  servidor local sin login (no entra en la imagen)
 backend/tests/    pytest
-backend/scripts/evaluate.py
+backend/scripts/evaluate.py, experiment.py
 data/pgn/         partidas de muestra
 web/              Nuxt 4 + Vue 3 (+ scripts/swa-config.mjs: cabeceras y CSP de la SWA)
 infra/            Bicep

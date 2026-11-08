@@ -1,4 +1,5 @@
 from .alphabeta import MATE, AlphaBetaSearcher, SearchResult, is_mate_score, mate_in_moves
+from .anchors import StockfishAnchor
 from .evaluation import PIECE_VALUES, evaluate, evaluate_stm
 from .opponents import (
     GreedyOpponent,
@@ -19,6 +20,7 @@ __all__ = [
     "MoveDecision",
     "RandomOpponent",
     "SearchResult",
+    "StockfishAnchor",
     "StockfishOpponent",
     "classic_opponent_catalog",
     "evaluate",

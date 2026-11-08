@@ -63,6 +63,11 @@ class Settings:
     max_analysis_plies: int = 200
     max_concurrent_analyses: int = 1
     analysis_timeout_s: float = 90.0
+    # Autenticación con Entra ID: "default" (DefaultAzureCredential), "cli" (AzureCliCredential) o "key".
+    azure_auth: str = "default"
+    # Solo se envían si se configuran (None = valor por defecto del proveedor).
+    azure_reasoning_effort: str | None = None
+    llm_max_tokens: int | None = None
 
 
 @lru_cache
@@ -94,4 +99,7 @@ def get_settings() -> Settings:
         max_analysis_plies=_env_int("MAX_ANALYSIS_PLIES", 200),
         max_concurrent_analyses=_env_int("MAX_CONCURRENT_ANALYSES", 1),
         analysis_timeout_s=float(os.environ.get("ANALYSIS_TIMEOUT_S", "90")),
+        azure_auth=(os.environ.get("AZURE_AUTH") or "default").strip().lower(),
+        azure_reasoning_effort=(os.environ.get("AZURE_OPENAI_REASONING_EFFORT") or "").strip() or None,
+        llm_max_tokens=_env_int("LLM_MAX_TOKENS", 0) or None,
     )

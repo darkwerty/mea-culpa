@@ -1,9 +1,18 @@
 from __future__ import annotations
 
 import chess
+import pytest
 
 from meaculpa.llm import MockProvider, ScriptedProvider
-from meaculpa.llm_player import LLMOpponent, MetricsStore, parse_proposal
+from meaculpa.llm_player import (
+    BudgetExceeded,
+    CostTracker,
+    LLMForfeit,
+    LLMOpponent,
+    MetricsStore,
+    extract_move_text,
+    parse_proposal,
+)
 
 
 def test_parse_proposal_accepts_san_and_uci():
@@ -68,3 +77,76 @@ def test_mock_proposes_more_illegal_moves_at_high_temperature():
         return illegal / total
 
     assert illegal_rate(1.5) > illegal_rate(0.0)
+
+
+# ------------------------------------------------------------ modo experimento y métricas
+def test_temperature_is_not_sent_unless_configured():
+    provider = ScriptedProvider(["e4", "d4"])
+    LLMOpponent(provider).play(chess.Board())
+    LLMOpponent(provider, temperature=0.3).play(chess.Board())
+    assert provider.temperatures == [None, 0.3]
+
+
+def test_elo_mode_forfeits_instead_of_greedy_fallback(tmp_path):
+    provider = ScriptedProvider(["Ke9", "Qh9", "xx", "e4"])
+    metrics = MetricsStore(tmp_path / "m.jsonl")
+    opp = LLMOpponent(provider, max_retries=2, elo_mode=True, metrics=metrics)
+    record = opp.play(chess.Board())
+    assert record.forfeit and not record.fallback and record.final_uci == ""
+    assert len(record.attempts) == 3 and record.illegal_count == 3
+    with pytest.raises(LLMForfeit):
+        LLMOpponent(ScriptedProvider([None, None]), max_retries=1, elo_mode=True).choose_move(chess.Board())
+    assert metrics.summary()[0]["derrotas_por_ilegal"] == 1
+
+
+def test_per_move_metrics_tokens_latency_and_cost():
+    provider = ScriptedProvider(["Ke9", "e4"], price_input_per_m=1.0, price_output_per_m=5.0)
+    record = LLMOpponent(provider).play(chess.Board())
+    d = record.to_dict()
+    assert d["intentos"] == 2 and d["illegal_count"] == 1
+    assert d["input_tokens"] == 20 and d["output_tokens"] == 10
+    assert d["latency_ms"] == 2.0
+    assert d["cost_usd"] == pytest.approx(2 * (10 * 1.0 + 5 * 5.0) / 1e6)
+    assert d["attempts"][0]["cost_usd"] == pytest.approx((10 + 25) / 1e6)
+
+
+def test_hard_budget_stops_before_the_call():
+    provider = ScriptedProvider(["e4"], price_input_per_m=1000.0, price_output_per_m=1000.0)
+    budget = CostTracker(limit_usd=0.01)
+    with pytest.raises(BudgetExceeded):
+        LLMOpponent(provider, budget=budget, elo_mode=True).play(chess.Board())
+    assert provider.calls == [] and budget.spent_usd == 0 and budget.pending_usd == 0
+
+
+def test_budget_tracks_real_cost_and_parent():
+    total = CostTracker(limit_usd=1.0)
+    mine = CostTracker(parent=total)
+    provider = ScriptedProvider(["e4"], price_input_per_m=1.0, price_output_per_m=1.0)
+    LLMOpponent(provider, budget=mine).play(chess.Board())
+    assert mine.spent_usd == pytest.approx(15 / 1e6) and total.spent_usd == pytest.approx(15 / 1e6)
+    assert total.pending_usd == 0 and mine.pending_usd == 0
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Jugada: Nf3", "Nf3"),
+        ("Pienso en e4 o d4...\nJugada: **d4**", "d4"),
+        ("Jugada: 12... Bxe5+", "Bxe5+"),
+        ('{"move": "O-O"}', "O-O"),
+        ("Me gusta 0-0 aquí", "O-O"),
+        ("Tras analizar, juego exd5.", "exd5"),
+        ("Move: e8=Q", "e8=Q"),
+        ("ninguna jugada", None),
+        ("", None),
+    ],
+)
+def test_extract_move_text(text, expected):
+    assert extract_move_text(text) == expected
+
+
+def test_text_mode_player_validates_with_python_chess():
+    provider = ScriptedProvider(["Creo que Ke9.\nJugada: Ke9", "Vale.\nJugada: e4"], supports_structured=False)
+    record = LLMOpponent(provider).play(chess.Board())
+    assert record.final_uci == "e2e4" and [a.modo for a in record.attempts] == ["texto", "texto"]
+    assert "Jugada:" in provider.calls[0][0]["content"]  # el prompt de sistema pide la línea final

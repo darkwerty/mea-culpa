@@ -148,7 +148,8 @@ def build_opponent(cfg: dict[str, Any], provider: LLMProvider, metrics: MetricsS
     if kind == "llm":
         return LLMOpponent(
             provider,
-            temperature=float(cfg.get("temperature", 0.7)),
+            # Solo se envía si viene en la configuración del rival (None = valor por defecto del proveedor).
+            temperature=float(cfg["temperature"]) if cfg.get("temperature") is not None else None,
             max_retries=max_retries,
             show_legal_moves=bool(cfg.get("show_legal_moves", False)),
             metrics=metrics,

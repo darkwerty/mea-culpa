@@ -1,0 +1,75 @@
+# Experimento de ejemplo: LLM de Foundry, Claude y Ollama contra anclas de Stockfish.
+# Ejecutar desde la raíz del repo:
+#   .venv/Scripts/python backend/scripts/experiment.py eval/experimentos/ejemplo.yaml --dry-run
+#   .venv/Scripts/python backend/scripts/experiment.py eval/experimentos/ejemplo.yaml
+# ${VAR} y ${VAR:-defecto} se sustituyen por variables de entorno.
+
+nombre: ejemplo
+salida: eval/experimentos/ejemplo        # relativa a la raíz del repo
+semilla: 42
+partidas_por_emparejamiento: 10          # por cada pareja participante–ancla
+modo: anclas                             # anclas | todos (todos = además, participantes entre sí)
+tope_plies: 300                          # al llegar: tablas, anotadas aparte
+presupuesto_usd: 2.00                    # tope DURO de gasto en modelos de pago (todo el experimento)
+bootstrap: 1000                          # réplicas para el IC 95 %
+paralelo: 1                              # partidas a la vez
+# stockfish: C:/ruta/a/stockfish.exe     # si no, STOCKFISH_PATH, 'stockfish' en el PATH o el paquete de winget
+
+aperturas:
+  pgn: C:/Users/danie/Desktop/Dev/ajedrez-datos/qwerty0x-2026-10.pgn
+  usuario: qwerty0x                      # para describir el origen; los rivales salen como «rival (Elo N)»
+  plies_min: 4
+  plies_max: 8
+  ambos_colores: true                    # cada posición se juega con los dos colores
+  # max_eval_cp: 200                     # opcional: descarta aperturas ya decididas (evalúa con Stockfish)
+
+llm:                                     # valores por defecto de todos los participantes LLM
+  max_reintentos: 3                      # agotarlos = derrota por ilegalidad
+  mostrar_legales: false
+  salida: auto                           # auto | json | texto
+  # temperatura: 0.7                     # por defecto NO se envía (valor por defecto del proveedor)
+
+anclas:                                  # Elo fijo (escala UCI_Elo de Stockfish, CCRL Blitz)
+  - {nombre: sf1320, tipo: stockfish, elo: 1320, uci_elo: 1320, tiempo: 0.1, hash: 16}
+  - {nombre: sf1468, tipo: stockfish, elo: 1468, uci_elo: 1468, tiempo: 0.1, hash: 16}
+  - {nombre: sf1608, tipo: stockfish, elo: 1608, uci_elo: 1608, tiempo: 0.1, hash: 16}
+  # - {nombre: sf1320n, tipo: stockfish, elo: 1320, uci_elo: 1320, nodos: 20000}   # límite por nodos
+
+participantes:
+  - nombre: luna-none                    # Azure OpenAI / Foundry: varios deployments del mismo recurso
+    tipo: azure_openai
+    endpoint: ${AZURE_OPENAI_ENDPOINT}   # https://<recurso>.openai.azure.com/
+    deployment: gpt-6-luna
+    auth: cli                            # cli (AzureCliCredential) | default (DefaultAzureCredential) | key
+    reasoning_effort: none               # none | low | medium | high (según el modelo)
+    max_tokens: 400
+    precio_entrada_1m: 0.10
+    precio_salida_1m: 0.50
+
+  - nombre: luna-high
+    tipo: azure_openai
+    endpoint: ${AZURE_OPENAI_ENDPOINT}
+    deployment: gpt-6-luna
+    auth: cli
+    reasoning_effort: high
+    max_tokens: 16000
+    precio_entrada_1m: 0.10
+    precio_salida_1m: 0.50
+
+  - nombre: haiku-5-5                    # Claude en Foundry (Messages API); nunca envía temperature/top_p/top_k
+    tipo: claude_foundry
+    recurso: ${ANTHROPIC_FOUNDRY_RESOURCE}   # https://<recurso>.services.ai.azure.com/anthropic
+    deployment: claude-haiku-5-5
+    auth: cli
+    effort: low                          # low | medium | high | xhigh | max (por defecto, el del modelo)
+    max_tokens: 4000
+    precio_entrada_1m: 0.10
+    precio_salida_1m: 0.50
+
+  - nombre: lfm3-local                   # Ollama local (API compatible con OpenAI), gratis
+    tipo: ollama
+    modelo: lfm3:1.7b
+    base_url: http://localhost:11434/v1
+    salida_estructurada: auto            # auto: si el servidor rechaza response_format, pasa a texto
+    max_tokens: 300
+    reasoning_effort: none               # en modelos que piensan (p. ej. lfm3), sin esto agotan max_tokens

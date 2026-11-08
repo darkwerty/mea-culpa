@@ -8,7 +8,9 @@
 
 Uso (desde la raíz del repo):
     .venv/Scripts/python backend/scripts/evaluate.py                 # mock
-    LLM_PROVIDER=azure ... .venv/Scripts/python backend/scripts/evaluate.py --temps 0 0.7 1.2
+    LLM_PROVIDER=azure ... .venv/Scripts/python backend/scripts/evaluate.py --temps defecto 0 0.7
+
+`--temps defecto` (lo predeterminado) no envía temperatura: se usa la del proveedor.
 
 Escribe una tabla markdown en eval/resultados_<proveedor>.md y la imprime.
 """
@@ -109,7 +111,9 @@ def sample_positions(pgn_paths: list[Path], every: int) -> list[chess.Board]:
     return boards
 
 
-def evaluate_illegal_moves(boards: list[chess.Board], provider, temps: list[float], max_retries: int) -> list[str]:
+def evaluate_illegal_moves(
+    boards: list[chess.Board], provider, temps: list[float | None], max_retries: int
+) -> list[str]:
     lines = [
         "| Modelo | Temperatura | Posiciones | Propuestas | Ilegales | Tasa ilegal | Legal a la 1ª | Fallbacks |",
         "|---|--:|--:|--:|--:|--:|--:|--:|",
@@ -124,7 +128,7 @@ def evaluate_illegal_moves(boards: list[chess.Board], provider, temps: list[floa
             first_ok += rec.attempts[0].valida
             fallbacks += rec.fallback
         lines.append(
-            f"| {provider.name} | {t:.1f} | {len(boards)} | {proposals} | {illegal} | "
+            f"| {provider.name} | {'defecto' if t is None else f'{t:.1f}'} | {len(boards)} | {proposals} | {illegal} | "
             f"{illegal / proposals:.1%} | {first_ok / len(boards):.1%} | {fallbacks} |"
         )
     return lines
@@ -133,7 +137,13 @@ def evaluate_illegal_moves(boards: list[chess.Board], provider, temps: list[floa
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--pgn-dir", type=Path, default=ROOT / "data" / "pgn")
-    parser.add_argument("--temps", type=float, nargs="+", default=[0.0, 0.7, 1.2])
+    parser.add_argument(
+        "--temps",
+        type=lambda v: None if v.lower() in ("defecto", "default", "none") else float(v),
+        nargs="+",
+        default=[None],
+        help="temperaturas a probar; 'defecto' = no enviarla",
+    )
     parser.add_argument("--every", type=int, default=4, help="una posición de cada N plies para el test de ilegales")
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
@@ -186,7 +196,7 @@ def main() -> None:
     out.write_text(text, encoding="utf-8")
     sys.stdout.reconfigure(encoding="utf-8")
     print(text)
-    print(f"\n(guardado en {out.relative_to(ROOT)})")
+    print(f"\n(guardado en {out.relative_to(ROOT) if out.is_relative_to(ROOT) else out})")
 
 
 if __name__ == "__main__":
