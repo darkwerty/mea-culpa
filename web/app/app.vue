@@ -110,7 +110,7 @@ const checkSquare = computed(() => {
 })
 
 const opponentLabel = computed(() => {
-  if (mode.value === 'llm') return `IA de Foundry · ${catalog.value?.llm?.modelo ?? ''}`
+  if (mode.value === 'llm') return `IA de Foundry (${catalog.value?.llm?.modelo ?? ''})`
   return catalog.value?.clasicos?.find((o: any) => o.id === classicId.value)?.nombre ?? classicId.value
 })
 
@@ -179,7 +179,7 @@ const resultText = computed(() => {
   const g = game.value
   if (!g || g.status !== 'terminada') return ''
   const r = { victoria: 'Has ganado', derrota: 'Has perdido', tablas: 'Tablas' }[g.resultado_usuario ?? 'tablas']
-  return `${r} · ${g.motivo_fin} (${g.result})`
+  return `${r}: ${g.motivo_fin} (${g.result})`
 })
 
 const llmLog = computed(() => game.value?.last_opponent_meta?.registro ?? null)
@@ -190,14 +190,14 @@ const userTurn = computed(() => !!game.value && game.value.legal_moves.length > 
 <template>
   <div class="page">
     <header class="hero">
-      <p class="eyebrow">Entrenador de ajedrez · Microsoft Foundry</p>
+      <p class="eyebrow">Entrenador de ajedrez con Microsoft Foundry</p>
       <h1>Mea <span class="accent">culpa</span></h1>
       <p class="lead muted">
         Juega una partida y te digo, en castellano, <strong>por qué la has perdido</strong>. El motor encuentra los errores; la IA
         solo los explica.
       </p>
       <p v-if="catalog" class="faint">
-        LLM: <span class="pill">{{ catalog.llm.proveedor }} · {{ catalog.llm.modelo }}</span>
+        LLM: <span class="pill">{{ catalog.llm.proveedor }}, {{ catalog.llm.modelo }}</span>
         &nbsp;Análisis: <span class="pill">{{ catalog.motor_analisis }}</span>
         &nbsp;Stockfish: <span class="pill">{{ catalog.stockfish ? 'disponible' : 'no instalado' }}</span>
       </p>
@@ -313,7 +313,7 @@ const userTurn = computed(() => !!game.value && game.value.legal_moves.length > 
           <p class="eyebrow">Lo que propuso la IA</p>
           <ul class="attempts">
             <li v-for="(a, i) in llmLog.attempts" :key="i" :class="a.valida ? 'ok' : 'ko'">
-              <strong>{{ a.propuesta ?? '—' }}</strong>
+              <strong>{{ a.propuesta ?? '(ninguna)' }}</strong>
               <span v-if="a.valida"> ✓ legal</span>
               <span v-else> ✗ {{ a.error }}</span>
             </li>
@@ -338,21 +338,21 @@ const userTurn = computed(() => !!game.value && game.value.legal_moves.length > 
                   <span class="faint">{{ e.gravedad }}</span>
                 </div>
                 <p>{{ e.explicacion }}</p>
-                <p class="faint">Eval: {{ e.eval_antes }} → {{ e.eval_despues }} · mejor según el motor: <strong>{{ e.mejor_jugada }}</strong></p>
+                <p class="faint">Eval: {{ e.eval_antes }} → {{ e.eval_despues }}, mejor según el motor: <strong>{{ e.mejor_jugada }}</strong></p>
               </li>
             </ul>
             <div v-if="diagnosis.diagnostico.patrones_recurrentes.length" class="recurring">
               <p class="eyebrow">Se repite</p>
               <p v-for="r in diagnosis.diagnostico.patrones_recurrentes" :key="r.patron">
-                <span class="accent">{{ r.patron_texto }}</span> — {{ r.descripcion }}
+                <span class="accent">{{ r.patron_texto }}</span>: {{ r.descripcion }}
               </p>
             </div>
             <p class="advice"><span class="eyebrow">Consejo</span><br />{{ diagnosis.diagnostico.consejo }}</p>
           </template>
           <p v-else class="alert">El LLM no devolvió un diagnóstico válido: {{ diagnosis.error }}</p>
           <p class="faint">
-            Motor: {{ diagnosis.analisis.motor }} ({{ diagnosis.analisis.motor_ms }} ms) · LLM: {{ diagnosis.modelo }} ({{ diagnosis.latency_ms }} ms,
-            {{ diagnosis.input_tokens }}+{{ diagnosis.output_tokens }} tokens, ${{ diagnosis.coste_usd.toFixed(5) }}) · Validación:
+            Motor: {{ diagnosis.analisis.motor }} ({{ diagnosis.analisis.motor_ms }} ms). LLM: {{ diagnosis.modelo }} ({{ diagnosis.latency_ms }} ms,
+            {{ diagnosis.input_tokens }}+{{ diagnosis.output_tokens }} tokens, ${{ diagnosis.coste_usd.toFixed(5) }}). Validación:
             {{ diagnosis.grounding.errores_inventados_descartados ?? 0 }} errores inventados descartados
           </p>
         </div>
@@ -365,7 +365,7 @@ const userTurn = computed(() => !!game.value && game.value.legal_moves.length > 
               <tr v-for="h in history.slice(0, 8)" :key="h.id">
                 <td>{{ h.rival }}</td>
                 <td>{{ h.resultado_usuario ?? 'en curso' }}</td>
-                <td class="faint">{{ h.patrones.join(', ') || '—' }}</td>
+                <td class="faint">{{ h.patrones.join(', ') || '(ninguno)' }}</td>
               </tr>
             </tbody>
           </table>
@@ -391,11 +391,11 @@ const userTurn = computed(() => !!game.value && game.value.legal_moves.length > 
 
     <footer class="faint foot">
       <p>
-        Mea culpa · proyecto de <a href="https://danielalonso.dev">Daniel Alonso</a> · python-chess + FastAPI + Nuxt ·
-        Microsoft Foundry
+        Mea culpa, proyecto de <a href="https://danielalonso.dev">Daniel Alonso</a> (python-chess, FastAPI, Nuxt y
+        Microsoft Foundry)
       </p>
       <p>
-        <a :href="PRIVACY_URL">Privacidad</a> · <a :href="TERMS_URL">Condiciones</a> · Contacto:
+        <a :href="PRIVACY_URL">Privacidad</a>, <a :href="TERMS_URL">Condiciones</a>. Contacto:
         <a :href="`mailto:${CONTACT}`">{{ CONTACT }}</a>
       </p>
     </footer>

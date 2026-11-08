@@ -15,7 +15,7 @@ export default defineNuxtConfig({
   app: {
     head: {
       htmlAttrs: { lang: 'es' },
-      title: 'Mea culpa · por qué has perdido',
+      title: 'Mea culpa: por qué has perdido',
       meta: [
         { name: 'viewport', content: 'width=device-width, initial-scale=1' },
         { name: 'description', content: 'Juega al ajedrez y descubre, en castellano, por qué has perdido.' },
