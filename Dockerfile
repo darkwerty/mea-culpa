@@ -12,14 +12,22 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /app
 
 # Stockfish para el análisis "mea culpa" y para el rival Stockfish por nivel.
+# ODBC Driver 18 (repositorio de Microsoft para la versión de Debian de la imagen) para Azure SQL con pyodbc.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends stockfish \
+    && apt-get install -y --no-install-recommends stockfish curl gnupg ca-certificates \
+    && . /etc/os-release \
+    && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg \
+    && curl -fsSL "https://packages.microsoft.com/config/debian/${VERSION_ID}/prod.list" -o /etc/apt/sources.list.d/mssql-release.list \
+    && apt-get update \
+    && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 unixodbc \
+    && apt-get purge -y curl gnupg && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/* \
     && test -x /usr/games/stockfish
 
 # Versiones fijadas con constraints.txt: lo que se despliega es lo que pasó los tests.
 COPY requirements.txt constraints.txt ./
-RUN pip install --no-cache-dir -r requirements.txt azure-monitor-opentelemetry -c constraints.txt
+RUN pip install --no-cache-dir -r requirements.txt azure-monitor-opentelemetry -c constraints.txt \
+    && python -c "import pyodbc; assert 'ODBC Driver 18 for SQL Server' in pyodbc.drivers(), pyodbc.drivers()"
 
 # Solo el paquete de la API: backend/dev_server.py (usuario local sin login) NO entra en la imagen.
 COPY backend/meaculpa ./backend/meaculpa

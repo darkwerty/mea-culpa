@@ -8,6 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+DEFAULT_ADMIN_EMAILS = ("admin@example.com",)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -71,6 +72,24 @@ class Settings:
     # Modelos elegibles como rival IA (ids de models.MODEL_CATALOG) y el que se usa si no se elige ninguno.
     llm_models: tuple[str, ...] = ()
     llm_default_model: str | None = None
+    # Azure SQL (oferta gratuita): solo servidor y base de datos; se entra con la identidad administrada.
+    # Vacío = SQLite en data_dir (local y tests).
+    sql_server: str | None = None
+    sql_database: str | None = None
+    # Panel /admin: correos de Google (verificados) con acceso. Cualquier otro recibe 403.
+    admin_emails: tuple[str, ...] = DEFAULT_ADMIN_EMAILS
+    # Gasto de Azure en el panel: suscripción para Cost Management y límite mensual de referencia.
+    azure_subscription_id: str | None = None
+    azure_budget_eur: float = 40.0
+    # Formulario de contacto: envíos por IP y día, y total de envíos al día.
+    contact_per_ip_per_day: int = 5
+    contact_per_day: int = 100
+
+
+def parse_admin_emails(raw: str | None) -> tuple[str, ...]:
+    if raw is None or not raw.strip():
+        return DEFAULT_ADMIN_EMAILS
+    return tuple(e.strip().lower() for e in raw.split(",") if e.strip())
 
 
 @lru_cache
@@ -107,4 +126,11 @@ def get_settings() -> Settings:
         llm_max_tokens=_env_int("LLM_MAX_TOKENS", 0) or None,
         llm_models=tuple(m.strip() for m in os.environ.get("LLM_MODELS", "").split(",") if m.strip()),
         llm_default_model=(os.environ.get("LLM_DEFAULT_MODEL") or "").strip() or None,
+        sql_server=(os.environ.get("AZURE_SQL_SERVER") or "").strip() or None,
+        sql_database=(os.environ.get("AZURE_SQL_DATABASE") or "").strip() or None,
+        admin_emails=parse_admin_emails(os.environ.get("ADMIN_EMAILS")),
+        azure_subscription_id=(os.environ.get("AZURE_SUBSCRIPTION_ID") or "").strip() or None,
+        azure_budget_eur=float(os.environ.get("AZURE_BUDGET_EUR") or "40"),
+        contact_per_ip_per_day=_env_int("CONTACT_PER_IP_PER_DAY", 5),
+        contact_per_day=_env_int("CONTACT_PER_DAY", 100),
     )

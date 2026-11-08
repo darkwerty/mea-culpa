@@ -99,13 +99,15 @@ class GeoStore:
 class GeoLimiter(UsageLimiter):
     """El `UsageLimiter` de Mea culpa con los tipos de cuota del juego."""
 
-    def __init__(self, objects: ObjectStore, settings: Settings, geo: GeoSettings, clock=time.time) -> None:
-        super().__init__(objects, settings, clock=clock)
+    def __init__(
+        self, objects: ObjectStore, settings: Settings, geo: GeoSettings, clock=time.time, overrides=None
+    ) -> None:
+        super().__init__(objects, settings, clock=clock, overrides=overrides)
         self.limits = {"geo_partidas": geo.quota_games_per_day, "geo_ia": geo.quota_llm_per_day}
         self.geo_global_limit = geo.global_llm_per_day
 
     def consume(self, owner: str, kind: str, amount: int = 1) -> None:
-        limit = self.limits[kind]
+        limit = self.limit(kind)
         if not self._increment(f"usage/{self._day()}/{owner}", kind, amount, limit):
             raise HTTPException(
                 429, f"Has llegado al límite diario de {GEO_KIND_LABELS[kind]} ({limit}). Vuelve mañana."
@@ -114,9 +116,12 @@ class GeoLimiter(UsageLimiter):
     def consume_geo_llm(self, owner: str) -> None:
         """Una llamada a la IA: cuota del usuario, fusible del juego y fusible global de la demo."""
         self.consume(owner, "geo_ia")
-        if not self._increment(f"usage/{self._day()}/global", "geo_llm_calls", 1, self.geo_global_limit):
+        if not self._increment(f"usage/{self._day()}/global", "geo_llm_calls", 1, self.geo_limit()):
             raise HTTPException(503, "El juego ha agotado su presupuesto diario de IA. Vuelve mañana.")
         self.consume_llm_calls(1)
+
+    def geo_limit(self) -> int:
+        return self.overrides("geo_global", self.geo_global_limit) if self.overrides else self.geo_global_limit
 
     def record_cost(self, model: str, input_tokens: int, output_tokens: int, usd: float) -> None:
         key = f"usage/{self._day()}/geo_costes"

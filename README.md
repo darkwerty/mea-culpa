@@ -281,6 +281,14 @@ export STOCKFISH_PATH="C:/.../stockfish-windows-x86-64-universal.exe"   # o 'sto
   Container App está enlazada como backend de la SWA `swa-danielalonso` (plan Standard, ~9 $/mes, requisito para
   enlazar backends), que reenvía `danielalonso.dev/api/*` a la API; por eso todas las rutas cuelgan de
   `/api/meaculpa`. La SWA de este repo solo redirige `meaculpa.danielalonso.dev` a la nueva URL.
+- **Azure SQL Database con la oferta gratuita** (`meaculpa-sql-fc` / `meaculpa`, francecentral): usuarios, eventos
+  de uso con coste y tokens por modelo, mensajes del formulario de contacto y controles del panel
+  `danielalonso.dev/admin`. Serverless GP Gen5 2 vCores con `useFreeLimit` y `freeLimitExhaustionBehavior=AutoPause`:
+  si se agota el límite gratuito del mes (100 000 s de vCore y 32 GB) **se pausa hasta el mes siguiente en vez de
+  cobrar**, y las demos siguen funcionando sin ella (las escrituras de uso se descartan, los controles usan lo último
+  conocido). Solo autenticación de Microsoft Entra (sin usuarios ni contraseñas SQL); la API entra con su identidad
+  administrada (`meaculpa-api-id`, solo SELECT/INSERT/UPDATE/DELETE en sus tablas, ver `infra/sql/identidad_api.sql`).
+  Firewall: solo «permitir servicios de Azure». Migraciones versionadas en `backend/meaculpa/migrations/`.
 - **Presupuesto mensual** (desde 2026-11-01) con alertas al 50 % y 90 % (real) y al 100 % (previsto) a
   admin@example.com.
 
@@ -310,6 +318,31 @@ OIDC, sin secretos) → `nuxt generate` con la URL de la API → Static Web App.
    `az staticwebapp hostname set -n <swa> -g rg-mea-culpa --hostname meaculpa.danielalonso.dev` (o variable
    `BIND_CUSTOM_DOMAIN=true` para que lo haga el Bicep; si el CNAME no existe aún, esa validación falla).
 
+Base de datos (CLI, una vez; el Bicep solo pasa servidor y base de datos a la Container App):
+
+```bash
+az provider register -n Microsoft.Sql --wait
+az sql server create -g rg-mea-culpa -n meaculpa-sql-fc -l francecentral --enable-ad-only-auth \
+  --external-admin-principal-type User --external-admin-name <tu-upn> --external-admin-sid <tu-object-id>
+az sql server firewall-rule create -g rg-mea-culpa -s meaculpa-sql-fc -n AllowAzureServices \
+  --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0
+az sql db create -g rg-mea-culpa -s meaculpa-sql-fc -n meaculpa -e GeneralPurpose -f Gen5 -c 2 \
+  --compute-model Serverless --use-free-limit --free-limit-exhaustion-behavior AutoPause --backup-storage-redundancy Local
+# Migraciones y usuario de la identidad (abre antes una regla de firewall temporal para tu IP y bórrala después):
+export AZURE_SQL_SERVER=meaculpa-sql-fc.database.windows.net AZURE_SQL_DATABASE=meaculpa
+python backend/scripts/sql_admin.py migrar
+python backend/scripts/sql_admin.py sql infra/sql/identidad_api.sql
+# Gasto de Azure en /admin:
+az role assignment create --assignee-object-id <principalId de meaculpa-api-id> --assignee-principal-type ServicePrincipal \
+  --role "Cost Management Reader" --scope /subscriptions/<sub>
+```
+
+**Cómo comprobar que la base de datos no cobra**: `az sql db show -g rg-mea-culpa -s meaculpa-sql-fc -n meaculpa
+--query "{free:useFreeLimit, alAgotarse:freeLimitExhaustionBehavior, sku:currentSku.name}"` debe dar `true`,
+`AutoPause` y `GP_S_Gen5`. En el portal, la página de la base de datos muestra el banner de la oferta gratuita y, en
+«Información general», el uso del límite gratuito del mes (segundos de vCore y almacenamiento). En Cost Management la
+base de datos aparece con coste 0.
+
 Si se borra el grupo, la cuenta de Foundry queda en *soft-delete*: para recrearla con el mismo nombre, antes
 `az cognitiveservices account purge -g rg-mea-culpa -n meaculpa-fc-7952 -l francecentral`.
 
@@ -331,6 +364,7 @@ en la calculadora de Azure antes de desplegar:
 | Container Apps (escala a cero, dentro de la concesión gratuita mensual) | ~0 € |
 | Log Analytics / App Insights (bajo la franja gratuita de 5 GB) | ~0 € |
 | Static Web Apps Free | 0 € |
+| Azure SQL Database (oferta gratuita, se pausa al agotarla) | 0 € |
 | Azure Container Registry Basic (coste fijo) | ~4,6 € |
 | Foundry: tokens (≈0,0005 $ por diagnóstico, ≈0,005 $ por partida contra el LLM) | < 1 € con 100 partidas |
 | **Total** | **~5–7 €/mes** |

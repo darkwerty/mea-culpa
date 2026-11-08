@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from ..auth import User
 from ..config import Settings
+from ..datos import DataStore
 from ..llm.base import LLMProvider, cost_usd
 from ..models import CATALOG_BY_ID, MODEL_CATALOG, build_model_providers
 from ..storage import ObjectStore
@@ -75,7 +76,9 @@ def create_geo_router(
     models: dict[str, LLMProvider] | None = None,
     geo_settings: GeoSettings | None = None,
     photos: PhotoSet | None = None,
+    data: DataStore | None = None,
 ) -> APIRouter:
+    """`data`: registro de uso y controles de /admin (modelos desactivados, cuotas). Opcional en tests."""
     geo = geo_settings or get_geo_settings()
     photos = photos or PhotoSet(geo.photos_dir)
     if len(photos) < geo.rounds:
@@ -83,8 +86,19 @@ def create_geo_router(
     models = vision_models(models, settings, geo)
     default_model = geo.default_model if geo.default_model in models else next(iter(models), None)
     store = GeoStore(objects)
-    limiter = GeoLimiter(objects, settings, geo)
+    limiter = GeoLimiter(objects, settings, geo, overrides=data.quota if data else None)
     router = APIRouter(prefix=GEO_PREFIX)
+
+    def _enabled(model_id: str) -> bool:
+        return data.model_enabled(model_id) if data else True
+
+    def _record(user: User, tipo: str, **kw: Any) -> None:
+        if data is None:
+            return
+        try:
+            data.record(user.owner, "geo", tipo, **kw)
+        except Exception:  # noqa: BLE001 - el registro de uso nunca rompe la partida
+            log.exception("No se pudo registrar el evento %s", tipo)
 
     def _get(user: User, game_id: str) -> GeoGame:
         game = store.get(user.owner, game_id)  # solo entre las partidas del propio usuario
@@ -166,7 +180,7 @@ def create_geo_router(
                 "etiqueta": m.etiqueta,
                 "descripcion": GEO_DESCRIPTIONS.get(m.id, m.descripcion),
                 "proveedor": "Anthropic" if m.proveedor == "claude" else "OpenAI",
-                "disponible": m.id in models,
+                "disponible": m.id in models and _enabled(m.id),
                 "por_defecto": m.id == default_model,
             }
             for m in MODEL_CATALOG
@@ -184,12 +198,17 @@ def create_geo_router(
                         "por_defecto": model_id == default_model,
                     }
                 )
-        return {"modelos": rows, "por_defecto": default_model, "rondas": geo.rounds}
+        return {
+            "modelos": rows,
+            "por_defecto": default_model,
+            "rondas": geo.rounds,
+            "demo_activa": data.demo_enabled("geo") if data else True,
+        }
 
     @router.post("/partidas")
     def new_game(req: NewGeoGame, user: User = Depends(current_user)) -> dict[str, Any]:
         model_id = req.modelo or default_model
-        if model_id is None or model_id not in models:
+        if model_id is None or model_id not in models or not _enabled(model_id):
             raise HTTPException(400, "Ese modelo no está disponible ahora mismo")
         if len(photos) < geo.rounds:
             raise HTTPException(503, "El juego no tiene fotos cargadas")
@@ -198,6 +217,7 @@ def create_geo_router(
         game = GeoGame(id=new_game_id(), owner=user.owner, created=time.time(), modelo=model_id, fotos=chosen)
         _save(game)
         store.mark_seen(user.owner, chosen)
+        _record(user, "geo_partida", ref=game.id, modelo=model_id)
         return _state(game)
 
     @router.get("/partidas/{game_id}")
@@ -223,7 +243,7 @@ def create_geo_router(
         if n != game.ronda_actual:
             raise HTTPException(409, "Esa ronda ya se ha jugado o todavía no toca")
         provider = models.get(game.modelo)
-        if provider is None:
+        if provider is None or not _enabled(game.modelo):
             raise HTTPException(503, "El modelo de esta partida ya no está disponible")
         # Cuota antes de nada: si no hay cuota, la ronda sigue abierta para cuando la haya.
         limiter.consume_geo_llm(user.owner)
@@ -252,6 +272,15 @@ def create_geo_router(
         else:
             ai.update(distancia_km=None, puntos=0)
         game.rondas[n].update(ia={**ai, **metrics}, coste_usd=round(usd, 6))
+        _record(
+            user,
+            "geo_ronda",
+            ref=game.id,
+            modelo=game.modelo,
+            tokens_in=metrics.get("tokens_entrada", 0),
+            tokens_out=metrics.get("tokens_salida", 0),
+            usd=usd,
+        )
         if game.ronda_actual >= len(game.fotos):
             game.estado = "terminada"
         _save(game)
@@ -262,6 +291,6 @@ def create_geo_router(
     @router.get("/costes")
     def costs(user: User = Depends(current_user)) -> dict[str, Any]:
         """Coste acumulado de hoy (UTC) por modelo, para vigilar el gasto."""
-        return {"hoy": limiter.costs_today(), "limites_diarios": limiter.limits}
+        return {"hoy": limiter.costs_today(), "limites_diarios": limiter.effective_limits()}
 
     return router

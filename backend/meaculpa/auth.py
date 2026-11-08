@@ -1,8 +1,9 @@
 """Login con Google Identity Services: el frontend manda el ID token en `Authorization: Bearer`.
 
 Se verifica la firma (claves públicas de Google), `aud` == GOOGLE_CLIENT_ID, `iss`, `exp` y que el
-correo esté verificado. El usuario se identifica por un hash del `sub`: ni el correo ni el `sub` en claro
-llegan al almacenamiento ni a los logs.
+correo esté verificado. El usuario se identifica por un hash del `sub`: el `sub` en claro no llega al
+almacenamiento ni a los logs. El correo solo se guarda en la tabla de usuarios de la base de datos (para el panel
+/admin y para atender peticiones de privacidad) y decide quién entra en /admin.
 
 No hay ningún modo sin autenticación configurable por variable de entorno. Para desarrollo local sin
 cuenta de Google existe `backend/dev_server.py`, que no se copia a la imagen Docker.
@@ -14,7 +15,7 @@ import hashlib
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import HTTPException, Request
@@ -27,6 +28,7 @@ CERTS_CACHE_SECONDS = 3600
 class User:
     owner: str  # sha256 del sub: clave de almacenamiento y de cuotas
     name: str | None = None
+    email: str | None = field(default=None, repr=False)  # verificado por Google (email_verified)
 
 
 TokenVerifier = Callable[[str], dict[str, Any]]
@@ -89,7 +91,9 @@ def validate_claims(claims: dict[str, Any], client_id: str) -> User:
     if not isinstance(sub, str) or not sub:
         raise ValueError("falta sub")
     name = claims.get("given_name") or claims.get("name")
-    return User(owner=owner_id(sub), name=str(name)[:60] if name else None)
+    email = claims.get("email")
+    email = email.strip().lower()[:320] if isinstance(email, str) and email.strip() else None
+    return User(owner=owner_id(sub), name=str(name)[:60] if name else None, email=email)
 
 
 def make_user_dependency(verifier: TokenVerifier, client_id: str) -> Callable[[Request], User]:

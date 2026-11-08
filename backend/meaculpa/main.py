@@ -13,9 +13,12 @@ from typing import Annotated, Any, Literal
 
 import chess
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from .admin import create_admin_router
 from .analysis import (
     AnalysisTimeout,
     analyze_moves,
@@ -27,6 +30,10 @@ from .analysis import (
 )
 from .auth import TokenVerifier, User, google_verifier, make_user_dependency
 from .config import Settings, get_settings
+from .contacto import create_contact_router
+from .costes_azure import AzureCosts, http_fetcher
+from .datos import DataStore
+from .db import Database, mssql_connector
 from .engines import classic_opponent_catalog, find_stockfish
 from .games import (
     GameConflictError,
@@ -38,7 +45,7 @@ from .games import (
     new_game_id,
 )
 from .geo import GEO_PREFIX, create_geo_router
-from .geo.config import GeoSettings
+from .geo.config import GeoSettings, get_geo_settings
 from .geo.photos import PhotoSet
 from .llm import LLMProvider, get_provider
 from .llm_player import MetricsStore
@@ -105,8 +112,30 @@ SECURITY_HEADERS = {
 
 
 def current_user(request: Request) -> User:
-    """Dependencia de FastAPI: verifica el ID token de Google con el verificador de esta app."""
-    return request.app.state.authenticate(request)
+    """Dependencia de FastAPI: verifica el ID token de Google, registra la visita y rechaza a los bloqueados."""
+    user = request.app.state.authenticate(request)
+    if request.app.state.data.touch_user(user.owner, user.email, user.name):
+        raise HTTPException(403, "Tu cuenta no puede usar las demos. Escribe a hola@danielalonso.dev si es un error.")
+    return user
+
+
+def _azure_credential(settings: Settings) -> Any:
+    if settings.azure_auth == "cli":
+        from azure.identity import AzureCliCredential
+
+        return AzureCliCredential()
+    from azure.identity import DefaultAzureCredential
+
+    return DefaultAzureCredential()
+
+
+def make_database(settings: Settings) -> Database:
+    """Azure SQL con la identidad administrada si hay servidor y base de datos; si no, SQLite en data_dir."""
+    if settings.sql_server and settings.sql_database:
+        connect = mssql_connector(settings.sql_server, settings.sql_database, _azure_credential(settings))
+        return Database(connect, "mssql")
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    return Database.sqlite(settings.data_dir / "meaculpa.db")
 
 
 CurrentUser = Annotated[User, Depends(current_user)]
@@ -120,11 +149,15 @@ def create_app(
     models: dict[str, LLMProvider] | None = None,
     geo_settings: GeoSettings | None = None,
     geo_photos: PhotoSet | None = None,
+    database: Database | None = None,
+    azure_costs: AzureCosts | None = None,
 ) -> FastAPI:
     """Crea la API. Sin GOOGLE_CLIENT_ID no arranca: todas las rutas salvo salud y modelos exigen login.
 
     `models`: rivales IA elegibles por id (por defecto, los de LLM_MODELS; sin ninguno, solo `provider`).
     `geo_settings`, `geo_photos`: configuración y fotos de ¿Dónde está esta foto? (por defecto, entorno y data/fotos).
+    `database`: usuarios, uso, mensajes y controles (por defecto, Azure SQL si está configurado o SQLite).
+    `azure_costs`: gasto de Azure para /admin (por defecto, Cost Management con la identidad administrada).
     """
     settings = settings or get_settings()
     if not settings.google_client_id:
@@ -138,8 +171,17 @@ def create_app(
         models = {provider.name: provider}
     default_model = settings.llm_default_model if settings.llm_default_model in models else next(iter(models))
     objects = objects or make_object_store(settings)
+    data = DataStore(database or make_database(settings))
+    geo_settings = geo_settings or get_geo_settings()
+    if azure_costs is None:
+        fetch = (
+            http_fetcher(settings.azure_subscription_id, _azure_credential(settings))
+            if settings.azure_subscription_id
+            else None
+        )
+        azure_costs = AzureCosts(fetch, settings.azure_budget_eur)
     store = GameStore(objects)
-    limiter = UsageLimiter(objects, settings)
+    limiter = UsageLimiter(objects, settings, overrides=data.quota)
     metrics = MetricsStore(settings.data_dir / "llm_moves.jsonl")
     analysis_slots = threading.BoundedSemaphore(max(1, settings.max_concurrent_analyses))
     _setup_telemetry()
@@ -149,10 +191,25 @@ def create_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.cors_origins),
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Authorization", "Content-Type"],
         max_age=600,
     )
+
+    @app.middleware("http")
+    async def demo_switch(request: Request, call_next):
+        """Demo desactivada desde /admin: 503 en todo salvo salud y catálogo de modelos."""
+        path = request.url.path
+        for demo, prefix in (("meaculpa", API_PREFIX), ("geo", GEO_PREFIX)):
+            if (
+                path.startswith(prefix + "/")
+                and not path.endswith(("/health", "/models"))
+                and not await run_in_threadpool(data.demo_enabled, demo)
+            ):
+                return JSONResponse(
+                    {"detail": "Esta demo está desactivada ahora mismo. Vuelve a probar más tarde."}, status_code=503
+                )
+        return await call_next(request)
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -165,6 +222,16 @@ def create_app(
     app.state.provider = provider
     app.state.limiter = limiter
     app.state.authenticate = make_user_dependency(verifier, client_id)
+    app.state.data = data
+
+    def _usable(model_id: str) -> bool:
+        return model_id in models and data.model_enabled(model_id)
+
+    def _record(user: User, tipo: str, **kw: Any) -> None:
+        try:
+            data.record(user.owner, "meaculpa", tipo, **kw)
+        except Exception:  # noqa: BLE001 - el registro de uso nunca rompe la partida
+            log.exception("No se pudo registrar el evento %s", tipo)
 
     def _get(user: User, game_id: str) -> GameRecord:
         game = store.get(user.owner, game_id)  # solo busca entre las partidas del usuario
@@ -179,10 +246,13 @@ def create_app(
             raise HTTPException(409, "La partida ha cambiado en otra pestaña; recárgala") from exc
 
     def _opponent_move(user: User, game: GameRecord, board: chess.Board) -> None:
+        model_id = game.opponent.get("model") or default_model
         if game.opponent.get("type") == "llm":
+            if not data.model_enabled(model_id):
+                raise HTTPException(503, "Ese modelo está desactivado ahora mismo; empieza otra partida con otro rival")
             limiter.consume(user.owner, "jugadas_llm")
             limiter.consume_llm_calls(1 + settings.llm_max_retries)  # peor caso: todos los reintentos
-        llm = models.get(game.opponent.get("model") or default_model, provider)
+        llm = models.get(model_id, provider)
         opp = build_opponent(game.opponent, llm, metrics, settings.llm_max_retries)
         t0 = time.perf_counter()
         decision = opp.choose_move(board)
@@ -195,6 +265,17 @@ def create_app(
         game.moves.append(decision.move.uci())
         game.last_opponent_meta = meta
         finish_if_over(game, board)
+        if game.opponent.get("type") == "llm":
+            reg = meta.get("registro") or {}
+            _record(
+                user,
+                "jugada_ia",
+                ref=game.id,
+                modelo=model_id,
+                tokens_in=reg.get("input_tokens", 0),
+                tokens_out=reg.get("output_tokens", 0),
+                usd=reg.get("cost_usd", 0.0),
+            )
 
     @contextmanager
     def _analysis_slot(user: User, plies: int) -> Iterator[float]:
@@ -231,17 +312,23 @@ def create_app(
                 "modelo": provider.name,
                 "max_reintentos": settings.llm_max_retries,
             },
-            "modelos": model_catalog(models, default_model),
+            "modelos": _catalog(),
             "stockfish": stockfish,
             "motor_analisis": "Stockfish" if stockfish else f"alfa-beta propio (profundidad {settings.analysis_depth})",
-            "limites_diarios": limiter.limits,
+            "limites_diarios": limiter.effective_limits(),
             "usuario": user.name,
         }
 
     @app.get(API_PREFIX + "/models")
     def list_models() -> dict[str, Any]:
         """Público (sin login): el selector de modelo se pinta antes de entrar con Google."""
-        return {"modelos": model_catalog(models, default_model), "por_defecto": default_model}
+        return {"modelos": _catalog(), "por_defecto": default_model, "demo_activa": data.demo_enabled("meaculpa")}
+
+    def _catalog() -> list[dict[str, Any]]:
+        rows = model_catalog(models, default_model)
+        for row in rows:
+            row["disponible"] = row["disponible"] and data.model_enabled(row["id"])
+        return rows
 
     @app.post(API_PREFIX + "/games")
     def new_game(req: NewGameRequest, user: CurrentUser) -> dict[str, Any]:
@@ -249,7 +336,7 @@ def create_app(
         cfg["nombre"] = OPPONENT_NAMES[req.opponent.type]
         if req.opponent.type == "llm":
             model_id = req.opponent.model or default_model
-            if model_id not in models:
+            if not _usable(model_id):
                 raise HTTPException(400, "Ese modelo no está disponible ahora mismo")
             cfg["model"] = model_id
             spec = CATALOG_BY_ID.get(model_id)
@@ -263,6 +350,7 @@ def create_app(
             id=new_game_id(), created=time.time(), user_color=req.user_color, opponent=cfg, owner=user.owner
         )
         board = game.board()
+        _record(user, "partida", ref=game.id, modelo=cfg.get("model"))
         if game.user_chess_color == chess.BLACK:
             _opponent_move(user, game, board)
         _save(game)
@@ -304,6 +392,7 @@ def create_app(
         if move not in board.legal_moves:
             raise HTTPException(422, "Jugada ilegal")
         limiter.consume(user.owner, "jugadas")
+        _record(user, "jugada", ref=game.id)
         board.push(move)
         game.moves.append(move.uci())
         game.last_opponent_meta = None
@@ -346,6 +435,15 @@ def create_app(
                 game.resultado_usuario or "", "en curso"
             )
             diag = diagnose(analysis, provider, game.pgn(), result_text, history, settings=settings)
+        _record(
+            user,
+            "analisis",
+            ref=game.id,
+            modelo=diag.modelo,
+            tokens_in=diag.input_tokens,
+            tokens_out=diag.output_tokens,
+            usd=diag.coste_usd,
+        )
         game.analysis = {**analysis.to_dict(), "motor_ms": round(engine_ms), "historial": history}
         game.patrones = analysis.patrones_partida
         game.diagnosis = asdict(diag)
@@ -377,6 +475,14 @@ def create_app(
             history = history_counts([], analysis.patrones_partida)
             pgn = pgn_without_comments(pgn_game)
             diag = diagnose(analysis, provider, pgn, "desconocido", history, settings=settings)
+        _record(
+            user,
+            "analisis_pgn",
+            modelo=diag.modelo,
+            tokens_in=diag.input_tokens,
+            tokens_out=diag.output_tokens,
+            usd=diag.coste_usd,
+        )
         return {"analisis": analysis.to_dict(), **asdict(diag)}
 
     @app.get(API_PREFIX + "/metrics/llm")
@@ -396,6 +502,24 @@ def create_app(
             models=models,
             geo_settings=geo_settings,
             photos=geo_photos,
+            data=data,
+        )
+    )
+    app.include_router(create_contact_router(data=data, settings=settings))
+    app.include_router(
+        create_admin_router(
+            authenticate=app.state.authenticate,
+            admin_emails=settings.admin_emails,
+            data=data,
+            costs=azure_costs,
+            models=models,
+            quota_defaults={
+                **limiter.limits,
+                "llm_global": settings.global_llm_calls_per_day,
+                "geo_partidas": geo_settings.quota_games_per_day,
+                "geo_ia": geo_settings.quota_llm_per_day,
+                "geo_global": geo_settings.global_llm_per_day,
+            },
         )
     )
 

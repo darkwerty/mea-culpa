@@ -92,6 +92,15 @@ param budgetEmails array
 @description('Primer día del mes en que empieza el presupuesto (yyyy-MM-01). Fíjalo en el .bicepparam para que no cambie en cada despliegue.')
 param budgetStartDate string = utcNow('yyyy-MM-01')
 
+@description('Servidor lógico de Azure SQL (solo autenticación de Entra), creado con la CLI con la oferta gratuita')
+param sqlServerName string = 'meaculpa-sql-fc'
+
+@description('Base de datos serverless con la oferta gratuita (useFreeLimit, AutoPause al agotarla)')
+param sqlDatabaseName string = 'meaculpa'
+
+@description('Correos de Google con acceso al panel /admin (separados por comas)')
+param adminEmails string = 'admin@example.com'
+
 var suffix = uniqueString(resourceGroup().id)
 var foundryName = foundryAccountName
 var acrName = take(toLower('${prefix}acr${suffix}'), 50)
@@ -315,6 +324,12 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'AZURE_STORAGE_CONTAINER', value: storageContainerName }
             // Disco efímero solo para el registro de métricas del rival LLM (no hay datos de usuarios).
             { name: 'MEA_CULPA_DATA_DIR', value: '/tmp/mea-culpa' }
+            // Azure SQL (oferta gratuita, creada con la CLI: ver README). Sin secretos: entra con la identidad.
+            { name: 'AZURE_SQL_SERVER', value: '${sqlServerName}${environment().suffixes.sqlServerHostname}' }
+            { name: 'AZURE_SQL_DATABASE', value: sqlDatabaseName }
+            // Panel /admin: gasto del mes con Cost Management (rol Cost Management Reader sobre la suscripción).
+            { name: 'AZURE_SUBSCRIPTION_ID', value: subscription().subscriptionId }
+            { name: 'ADMIN_EMAILS', value: adminEmails }
           ]
         }
       ]
