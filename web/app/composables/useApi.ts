@@ -1,0 +1,41 @@
+export interface GameState {
+  id: string
+  fen: string
+  turn: 'white' | 'black'
+  user_color: 'white' | 'black'
+  opponent: Record<string, any>
+  moves_uci: string[]
+  moves_san: string[]
+  legal_moves: string[]
+  in_check: boolean
+  status: 'en_curso' | 'terminada'
+  result: string
+  resultado_usuario: 'victoria' | 'derrota' | 'tablas' | null
+  motivo_fin: string | null
+  last_move: string | null
+  last_opponent_meta: Record<string, any> | null
+  has_diagnosis: boolean
+  pgn: string
+}
+
+export function useApi() {
+  const base = useRuntimeConfig().public.apiBase as string
+  const call = <T>(path: string, opts: Record<string, any> = {}) =>
+    $fetch<T>(path, { baseURL: base, ...opts }).catch((err: any) => {
+      const detail = err?.data?.detail
+      throw new Error(typeof detail === 'string' ? detail : err?.message || 'Error de red')
+    })
+
+  return {
+    health: () => call<any>('/api/health'),
+    opponents: () => call<any>('/api/opponents'),
+    newGame: (body: any) => call<GameState>('/api/games', { method: 'POST', body }),
+    move: (id: string, uci: string) => call<GameState>(`/api/games/${id}/move`, { method: 'POST', body: { uci } }),
+    resign: (id: string) => call<GameState>(`/api/games/${id}/resign`, { method: 'POST' }),
+    game: (id: string) => call<GameState>(`/api/games/${id}`),
+    getAnalysis: (id: string) => call<any>(`/api/games/${id}/analysis`),
+    analyse: (id: string) => call<any>(`/api/games/${id}/analysis`, { method: 'POST' }),
+    games: () => call<any[]>('/api/games'),
+    metrics: () => call<any>('/api/metrics/llm'),
+  }
+}

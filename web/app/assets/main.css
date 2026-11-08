@@ -1,0 +1,142 @@
+/* Estilo a juego con danielalonso.dev: noche azul marino, cejas rosas, acento dorado. */
+:root {
+  --bg: #101421;
+  --bg-deep: #0b1020;
+  --panel: #161c2e;
+  --panel-2: #1b2540;
+  --text: #e9ecf4;
+  --text-soft: #a9b1c6;
+  --text-faint: #8d96ad;
+  --eyebrow: #ff6b95;
+  --accent: #ffcb47;
+  --link: #8fb4ff;
+  --line: rgba(255, 255, 255, 0.08);
+  --pill-bg: rgba(143, 180, 255, 0.12);
+  --pill-text: #a9c5ff;
+  --good: #6fd8a8;
+  --bad: #ff6b95;
+  --sq-light: #2c3a5e;
+  --sq-dark: #1d2742;
+  --radius: 16px;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: radial-gradient(1200px 600px at 70% -10%, #1b2540 0%, var(--bg-deep) 45%, var(--bg) 100%) fixed;
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: 'Figtree', system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  font-family: 'Bricolage Grotesque', 'Figtree', sans-serif;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  margin: 0;
+}
+
+.eyebrow {
+  color: var(--eyebrow);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.75rem;
+  font-weight: 700;
+  margin: 0 0 0.5rem;
+}
+
+.accent {
+  color: var(--accent);
+}
+
+.panel {
+  background: linear-gradient(180deg, rgba(27, 37, 64, 0.65), rgba(22, 28, 46, 0.85));
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+.btn {
+  border: 0;
+  border-radius: 999px;
+  padding: 0.7rem 1.3rem;
+  font-weight: 700;
+  background: var(--accent);
+  color: #1a1405;
+  transition: transform 0.15s ease, filter 0.15s ease;
+}
+.btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  filter: brightness(1.05);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn.ghost {
+  background: transparent;
+  color: var(--text-soft);
+  border: 1px solid var(--line);
+}
+.btn.pink {
+  background: var(--eyebrow);
+  color: #24030f;
+}
+
+.pill {
+  display: inline-block;
+  background: var(--pill-bg);
+  color: var(--pill-text);
+  border-radius: 999px;
+  padding: 0.15rem 0.65rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.muted {
+  color: var(--text-soft);
+}
+.faint {
+  color: var(--text-faint);
+  font-size: 0.85rem;
+}
+
+input[type='range'] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.85rem;
+}
+th,
+td {
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+}
+th {
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+a {
+  color: var(--link);
+}
