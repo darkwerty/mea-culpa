@@ -14,9 +14,11 @@ param googleClientId = readEnvironmentVariable('GOOGLE_CLIENT_ID')
 // Cuenta de Foundry existente (francecentral). gpt-6-luna no tiene cuota en la suscripción (0 TPM), así que la demo
 // usa gpt-4.1-mini (GlobalStandard, 200K TPM de cuota disponibles), que además admite temperatura.
 param foundryAccountName = 'meaculpa-fc-7952'
-// Selector de modelo del rival IA. gpt-6-luna, gpt-6.1-terra y claude-haiku-5-5 están en el catálogo pero sin cuota
-// (0 TPM): al conseguirla, crea su deployment y añádelos aquí (ids de backend/meaculpa/models.py).
-param llmModels = 'gpt-4.1-mini'
+// Selector de modelo del rival IA: "todos" = los no ocultos del catálogo (backend/meaculpa/models.py), con su
+// deployment creado por la CLI. gpt-6-luna, gpt-6.1-terra y claude-haiku-5-5 están ocultos (cuota 0): al conseguirla,
+// crea su deployment y añádelos aquí, p. ej. 'todos,gpt-6-luna'.
+param llmModels = 'todos'
+param foundrySweAccountName = 'meaculpa-swe-7952'
 param claudeResourceName = 'meaculpa-swe-7952'
 param modelName = 'gpt-4.1-mini'
 param modelVersion = '2025-04-14'

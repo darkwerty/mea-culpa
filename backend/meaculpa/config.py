@@ -60,6 +60,10 @@ class Settings:
     quota_llm_moves_per_day: int = 200
     quota_analyses_per_day: int = 20
     global_llm_calls_per_day: int = 3000
+    # Fusible de gasto en IA de las dos demos, en céntimos de dólar al día (50 = 0,50 USD, unos 15 al mes).
+    global_llm_cents_per_day: int = 50
+    # Y por persona y día (20 = 0,20 USD): una partida con un modelo caro no agota el de todos.
+    user_llm_cents_per_day: int = 20
     # Análisis: tope de plies, análisis simultáneos por réplica y tiempo máximo.
     max_analysis_plies: int = 200
     max_concurrent_analyses: int = 1
@@ -118,6 +122,8 @@ def get_settings() -> Settings:
         quota_llm_moves_per_day=_env_int("QUOTA_LLM_MOVES_PER_DAY", 200),
         quota_analyses_per_day=_env_int("QUOTA_ANALYSES_PER_DAY", 20),
         global_llm_calls_per_day=_env_int("GLOBAL_LLM_CALLS_PER_DAY", 3000),
+        global_llm_cents_per_day=_env_int("GLOBAL_LLM_CENTS_PER_DAY", 50),
+        user_llm_cents_per_day=_env_int("USER_LLM_CENTS_PER_DAY", 20),
         max_analysis_plies=_env_int("MAX_ANALYSIS_PLIES", 200),
         max_concurrent_analyses=_env_int("MAX_CONCURRENT_ANALYSES", 1),
         analysis_timeout_s=float(os.environ.get("ANALYSIS_TIMEOUT_S", "90")),

@@ -26,7 +26,9 @@ from ..auth import User
 from ..config import Settings
 from ..datos import DataStore
 from ..llm.base import LLMProvider, cost_usd
-from ..models import CATALOG_BY_ID, MODEL_CATALOG, build_model_providers
+from ..models import CATALOG_BY_ID, MODEL_CATALOG, build_model_providers, catalog_row, rival_label
+from ..quota import UsageLimiter
+from ..ranking import RankingStore
 from ..storage import ObjectStore
 from .config import GEO_DESCRIPTIONS, VISION_MODEL_IDS, GeoSettings, get_geo_settings
 from .photos import PhotoSet
@@ -43,6 +45,7 @@ MAX_ATTEMPTS = 2  # un reintento si la salida no cumple el esquema
 
 class NewGeoGame(BaseModel):
     modelo: str | None = Field(None, max_length=40)
+    ranking: bool = True  # casilla «Salir en el ranking con mi nombre» (marcada por defecto)
 
 
 def vision_models(
@@ -77,8 +80,14 @@ def create_geo_router(
     geo_settings: GeoSettings | None = None,
     photos: PhotoSet | None = None,
     data: DataStore | None = None,
+    ranking: RankingStore | None = None,
+    budget: UsageLimiter | None = None,
 ) -> APIRouter:
-    """`data`: registro de uso y controles de /admin (modelos desactivados, cuotas). Opcional en tests."""
+    """`data`: registro de uso y controles de /admin (modelos desactivados, cuotas). Opcional en tests.
+
+    `ranking`: rankings públicos (se guarda cada partida terminada). `budget`: fusible diario de gasto en IA
+    compartido con el ajedrez (por defecto, el del propio limitador del juego).
+    """
     geo = geo_settings or get_geo_settings()
     photos = photos or PhotoSet(geo.photos_dir)
     if len(photos) < geo.rounds:
@@ -87,6 +96,7 @@ def create_geo_router(
     default_model = geo.default_model if geo.default_model in models else next(iter(models), None)
     store = GeoStore(objects)
     limiter = GeoLimiter(objects, settings, geo, overrides=data.quota if data else None)
+    budget = budget or limiter
     router = APIRouter(prefix=GEO_PREFIX)
 
     def _enabled(model_id: str) -> bool:
@@ -176,15 +186,11 @@ def create_geo_router(
         """Público: solo los modelos que aceptan imágenes (disponible = desplegado y activado)."""
         rows = [
             {
-                "id": m.id,
-                "etiqueta": m.etiqueta,
+                **catalog_row(m, m.id in models and _enabled(m.id), default_model),
                 "descripcion": GEO_DESCRIPTIONS.get(m.id, m.descripcion),
-                "proveedor": "Anthropic" if m.proveedor == "claude" else "OpenAI",
-                "disponible": m.id in models and _enabled(m.id),
-                "por_defecto": m.id == default_model,
             }
             for m in MODEL_CATALOG
-            if m.id in VISION_MODEL_IDS
+            if m.id in VISION_MODEL_IDS and (not m.oculto or m.id in models)
         ]
         for model_id, provider in models.items():
             if model_id not in CATALOG_BY_ID:
@@ -194,6 +200,9 @@ def create_geo_router(
                         "etiqueta": provider.name,
                         "descripcion": "Rival de pruebas, no mira la foto",
                         "proveedor": "local",
+                        "fabricante": "local",
+                        "razona": False,
+                        "vision": True,
                         "disponible": True,
                         "por_defecto": model_id == default_model,
                     }
@@ -218,6 +227,8 @@ def create_geo_router(
         _save(game)
         store.mark_seen(user.owner, chosen)
         _record(user, "geo_partida", ref=game.id, modelo=model_id)
+        if ranking is not None:
+            ranking.set_preference(user, req.ranking)
         return _state(game)
 
     @router.get("/partidas/{game_id}")
@@ -246,6 +257,7 @@ def create_geo_router(
         if provider is None or not _enabled(game.modelo):
             raise HTTPException(503, "El modelo de esta partida ya no está disponible")
         # Cuota antes de nada: si no hay cuota, la ronda sigue abierta para cuando la haya.
+        budget.check_budget(user.owner)
         limiter.consume_geo_llm(user.owner)
 
         photo = photos.get(game.fotos[n])
@@ -266,6 +278,7 @@ def create_geo_router(
 
         # 2) La IA recibe solo la imagen.
         ai, usd, metrics = _ask_model(provider, photos.image_bytes(photo.id))
+        budget.add_cost(usd, user.owner)
         if "lat" in ai:
             d_ai = haversine_km(ai["lat"], ai["lon"], photo.lat, photo.lon)
             ai.update(distancia_km=round(d_ai, 1), puntos=score(d_ai))
@@ -284,9 +297,32 @@ def create_geo_router(
         if game.ronda_actual >= len(game.fotos):
             game.estado = "terminada"
         _save(game)
+        if game.estado == "terminada":
+            _rank(user, game)
         state = _state(game)
         state["ultima"] = state["rondas"][-1]
         return state
+
+    def _rank(user: User, game: GeoGame) -> None:
+        """Partida terminada al ranking, con los puntos que ha calculado el servidor."""
+        if ranking is None:
+            return
+        you = sum(r["jugador"]["puntos"] for r in game.rondas)
+        ai = sum((r.get("ia") or {}).get("puntos", 0) for r in game.rondas)
+        result = "victoria" if you > ai else "derrota" if you < ai else "tablas"
+        try:
+            ranking.record(
+                "geo",
+                game.id,
+                user,
+                rival=game.modelo,
+                rival_name=rival_label(game.modelo),
+                result=result,
+                points=you,
+                points_ai=ai,
+            )
+        except Exception:  # noqa: BLE001 - el ranking nunca rompe la partida
+            log.exception("No se pudo guardar la partida %s en el ranking", game.id)
 
     @router.get("/costes")
     def costs(user: User = Depends(current_user)) -> dict[str, Any]:

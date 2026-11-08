@@ -43,8 +43,11 @@ param apiPort int = 8000
 @description('Nombre de la cuenta de Microsoft Foundry (AIServices) existente en este grupo de recursos')
 param foundryAccountName string
 
-@description('Modelos elegibles como rival IA, separados por comas (solo los que tengan deployment y cuota)')
+@description('Modelos elegibles como rival IA, separados por comas, o "todos" (los no ocultos del catálogo de backend/meaculpa/models.py)')
 param llmModels string = 'gpt-4.1-mini'
+
+@description('Segunda cuenta de Foundry (swedencentral) con deployments de OpenAI que solo tienen cuota allí (gpt-4.1); vacío si no hay')
+param foundrySweAccountName string = ''
 
 @description('Recurso de Foundry con el deployment de Claude (Messages API); vacío si no hay')
 param claudeResourceName string = ''
@@ -108,6 +111,8 @@ var acrName = take(toLower('${prefix}acr${suffix}'), 50)
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 // Rol integrado "Cognitive Services OpenAI User": inferencia sin poder gestionar el recurso.
 var openAiUserRoleId = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
+// Rol integrado "Azure AI User" (Foundry User): inferencia de todos los modelos de Foundry (endpoint /models).
+var aiUserRoleId = '53ca6127-db72-4b80-b1b0-d745d6d5456d'
 // Rol integrado "Storage Blob Data Contributor": leer y escribir blobs, sin gestionar la cuenta.
 var blobContributorRoleId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
 var storageName = take(toLower('${prefix}st${suffix}'), 24)
@@ -168,6 +173,32 @@ resource apiCanCallModel 'Microsoft.Authorization/roleAssignments@2022-04-01' = 
   scope: foundry
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', openAiUserRoleId)
+    principalId: apiIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Modelos que no son de OpenAI (Meta, Mistral, xAI, DeepSeek...): endpoint de inferencia de modelos de Foundry.
+// Sus deployments se crean con la CLI (GlobalStandard, pago por uso): ver README.
+resource apiCanCallFoundryModels 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(foundry.id, apiIdentity.id, aiUserRoleId)
+  scope: foundry
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', aiUserRoleId)
+    principalId: apiIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource foundrySwe 'Microsoft.CognitiveServices/accounts@2025-06-01' existing = if (!empty(foundrySweAccountName)) {
+  name: empty(foundrySweAccountName) ? foundryName : foundrySweAccountName
+}
+
+resource apiCanCallSweModels 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(foundrySweAccountName)) {
+  name: guid(foundrySwe.id, apiIdentity.id, aiUserRoleId)
+  scope: foundrySwe
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', aiUserRoleId)
     principalId: apiIdentity.properties.principalId
     principalType: 'ServicePrincipal'
   }
@@ -313,6 +344,7 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'LLM_MODELS', value: llmModels }
             { name: 'LLM_DEFAULT_MODEL', value: chatModel.name }
             { name: 'ANTHROPIC_FOUNDRY_RESOURCE', value: claudeResourceName }
+            { name: 'AZURE_OPENAI_ENDPOINT_SWE', value: empty(foundrySweAccountName) ? '' : 'https://${foundrySweAccountName}.openai.azure.com/' }
             // DefaultAzureCredential usa esta identidad administrada:
             { name: 'AZURE_CLIENT_ID', value: apiIdentity.properties.clientId }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: 'appinsights-conn' }

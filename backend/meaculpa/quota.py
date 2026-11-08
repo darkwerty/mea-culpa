@@ -46,6 +46,11 @@ class UsageLimiter:
             "analisis": settings.quota_analyses_per_day,
         }
         self.global_llm_limit = settings.global_llm_calls_per_day
+        # Fusible de gasto: céntimos de dólar al día entre las dos demos (ajedrez y fotos), con lo que cuesta de
+        # verdad cada llamada según los tokens. Se puede cambiar desde /admin (cuota «ia_centimos_dia»).
+        self.global_cents_limit = settings.global_llm_cents_per_day
+        # Y por persona (cuota «ia_centimos_usuario»), para que una sola no agote el del día con un modelo caro.
+        self.user_cents_limit = settings.user_llm_cents_per_day
 
     def limit(self, kind: str) -> int:
         default = self.limits[kind]
@@ -77,6 +82,36 @@ class UsageLimiter:
         limit = self.limit(kind)
         if not self._increment(f"usage/{self._day()}/{owner}", kind, amount, limit):
             raise HTTPException(429, f"Has llegado al límite diario de {KIND_LABELS[kind]} ({limit}). Vuelve mañana.")
+
+    def cents_limit(self) -> int:
+        default = self.global_cents_limit
+        return self.overrides("ia_centimos_dia", default) if self.overrides else default
+
+    def user_cents_limit_now(self) -> int:
+        default = self.user_cents_limit
+        return self.overrides("ia_centimos_usuario", default) if self.overrides else default
+
+    def spent_micro_usd(self, who: str = "global") -> int:
+        found = self.objects.read(f"usage/{self._day()}/{who}")
+        return int(json.loads(found[0]).get("micro_usd", 0)) if found else 0
+
+    def check_budget(self, owner: str | None = None) -> None:
+        """Antes de llamar a un modelo: si hoy ya se ha gastado el presupuesto de IA (global o de esa persona)."""
+        if self.spent_micro_usd() >= self.cents_limit() * 10_000:
+            raise HTTPException(503, "La demo ha agotado su presupuesto diario de IA. Vuelve mañana.")
+        if owner and self.spent_micro_usd(owner) >= self.user_cents_limit_now() * 10_000:
+            raise HTTPException(
+                429,
+                "Has llegado al gasto diario en IA que puedo pagar por persona. Prueba con un modelo más barato mañana.",
+            )
+
+    def add_cost(self, usd: float, owner: str | None = None) -> None:
+        """Suma lo gastado en una llamada (en millonésimas de dólar). Nunca falla por el límite."""
+        micro = int(round(max(0.0, usd) * 1_000_000))
+        if micro:
+            self._increment(f"usage/{self._day()}/global", "micro_usd", micro, 10**15)
+            if owner:
+                self._increment(f"usage/{self._day()}/{owner}", "micro_usd", micro, 10**15)
 
     def consume_llm_calls(self, calls: int) -> None:
         """Fusible de coste: llamadas al LLM de todos los usuarios en el día (UTC)."""

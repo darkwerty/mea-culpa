@@ -16,3 +16,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON dbo.limites_contacto TO [meaculpa-api-id
 GRANT SELECT, INSERT, UPDATE, DELETE ON dbo.config TO [meaculpa-api-id];
 
 GRANT SELECT ON dbo.schema_migraciones TO [meaculpa-api-id];
+
+-- Rankings (migración 002; en una base de datos ya creada, infra/sql/002_ranking_permisos.sql).
+GRANT SELECT, INSERT, UPDATE ON dbo.ranking_jugadores TO [meaculpa-api-id];
+
+GRANT SELECT, INSERT ON dbo.ranking_partidas TO [meaculpa-api-id];

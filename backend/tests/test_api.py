@@ -223,8 +223,12 @@ def test_models_catalog_and_choice(settings):
     anon = TestClient(app)
     body = anon.get("/api/meaculpa/models").json()  # público: el selector se pinta antes del login
     by_id = {m["id"]: m for m in body["modelos"]}
-    assert set(by_id) >= {"gpt-4.1-mini", "gpt-6-luna", "gpt-6-luna-high", "gpt-6.1-terra", "claude-haiku-5-5"}
-    assert by_id["claude-haiku-5-5"]["disponible"] and not by_id["gpt-6.1-terra"]["disponible"]
+    # Los ocultos (sin cuota) solo aparecen si están activos; los demás del catálogo, aunque no estén desplegados.
+    assert set(by_id) >= {"gpt-4.1-mini", "claude-haiku-5-5", "llama-4-maverick", "deepseek-v3.2"}
+    assert not {"gpt-6-luna", "gpt-6-luna-high", "gpt-6.1-terra"} & set(by_id)
+    assert by_id["claude-haiku-5-5"]["disponible"] and not by_id["llama-4-maverick"]["disponible"]
+    assert by_id["gpt-5-mini"]["razona"] and not by_id["gpt-4.1-mini"]["razona"]
+    assert by_id["llama-4-maverick"]["fabricante"] == "Meta"
     assert body["por_defecto"] == "gpt-4.1-mini"
 
     client = TestClient(app, headers=auth("ana"))

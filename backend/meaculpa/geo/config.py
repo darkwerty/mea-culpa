@@ -7,14 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import ROOT_DIR
+from ..models import MODEL_CATALOG
 
-# Modelos del catálogo de Mea culpa (models.MODEL_CATALOG) que aceptan imágenes, según la documentación:
-# - gpt-4.1-mini, gpt-6-luna, gpt-6.1-terra: Microsoft Learn, «Foundry Models sold by Azure»
-#   (act. 2026-10-29): «Text and image input with text output» / «Text and image processing».
-#   gpt-6-luna-high es el mismo deployment gpt-6-luna con razonamiento alto.
-# - claude-haiku-5-5: catálogo de Foundry (ai.azure.com/catalog/models/claude-haiku-5-5): «text and image input».
-VISION_MODEL_IDS = ("gpt-6-luna", "gpt-6-luna-high", "gpt-6.1-terra", "claude-haiku-5-5", "gpt-4.1-mini")
-# Descripciones propias del juego cuando la del catálogo de Mea culpa habla de ajedrez.
+# Modelos del catálogo (models.MODEL_CATALOG) que aceptan imágenes: los marcados `vision`, comprobados con una
+# llamada real con una foto del juego (los que devuelven 400 con imagen o respuestas sin sentido no lo llevan).
+VISION_MODEL_IDS = tuple(m.id for m in MODEL_CATALOG if m.vision)
+# Descripciones propias del juego cuando la del catálogo habla de ajedrez.
 GEO_DESCRIPTIONS = {"gpt-6-luna-high": "Razonamiento alto, piensa cada foto"}
 
 

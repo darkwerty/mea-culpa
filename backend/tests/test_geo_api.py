@@ -52,7 +52,9 @@ def test_models_only_vision_and_mock(make_geo_client):
     c = make_geo_client()
     data = c.get("/api/geo/models").json()
     ids = {m["id"] for m in data["modelos"]}
-    assert {"gpt-6-luna", "gpt-6-luna-high", "gpt-6.1-terra", "claude-haiku-5-5"} <= ids
+    # Con visión y no ocultos (aunque no estén desplegados); los ocultos sin cuota no salen.
+    assert {"gpt-4.1-mini", "gpt-5-mini", "llama-4-maverick", "grok-4.1-fast", "kimi-k2.5"} <= ids
+    assert not {"gpt-6-luna", "gpt-6.1-terra", "claude-haiku-5-5", "deepseek-v3.2", "llama-3.3-70b"} & ids
     available = [m["id"] for m in data["modelos"] if m["disponible"]]
     assert available == ["mock-geo"] and data["por_defecto"] == "mock-geo"
     assert data["rondas"] == 5

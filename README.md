@@ -199,11 +199,40 @@ Las llamadas usan `chat.completions.parse(response_format=<modelo pydantic>)`.
 Los tests comprueban este cliente sin red: un transporte HTTP falso verifica la URL, la cabecera `Authorization: Bearer`,
 el `response_format` JSON Schema y el parseo. **No se ha probado contra un recurso real de Azure.**
 
-Selector de modelo del rival IA: `GET /api/meaculpa/models` devuelve el catálogo de `backend/meaculpa/models.py`
-(GPT-4.1 mini, GPT-6 Luna sin razonamiento y con razonamiento alto, GPT-6.1 Terra y Claude Haiku 5.5) con
-`disponible` por modelo, y `POST /api/meaculpa/games` acepta `opponent.model`. Solo se activan los ids de
-`LLM_MODELS` (separados por comas; `LLM_DEFAULT_MODEL` el que se usa si no se elige); Claude necesita además
-`ANTHROPIC_FOUNDRY_RESOURCE`.
+Selector de modelo del rival IA: `GET /api/meaculpa/models` (ajedrez) y `GET /api/geo/models` (fotos, solo los que
+aceptan imágenes) devuelven el catálogo de `backend/meaculpa/models.py` con `disponible`, `fabricante` y `razona` (los
+que razonan tardan más y el frontend lo avisa). `LLM_MODELS=todos` activa todos los no ocultos; GPT-6 Luna, GPT-6.1
+Terra y Claude Haiku 5.5 están ocultos porque la suscripción tiene cuota 0 (se activan con `LLM_MODELS=todos,gpt-6-luna`
+cuando haya cuota y deployment). Cada modelo va por su vía:
+
+| Vía | Modelos | Cómo |
+|---|---|---|
+| Azure OpenAI, API v1 (`/openai/v1/`) | GPT-4.1 mini, GPT-5 mini, GPT-5.4 mini (DataZoneStandard, UE), GPT-4o (Standard, Francia), GPT-4.1 (Standard, Suecia: `AZURE_OPENAI_ENDPOINT_SWE`); Kimi K3.1 Pro (oculto) | `llm/azure.py`, salida estructurada |
+| Inferencia de modelos de Foundry (`https://<cuenta>.services.ai.azure.com/models`, api-version 2024-05-01-preview) | Llama 4 Maverick y Scout, Llama 3.3 70B, Mistral Large 3, Medium 3 y 3.5, Small 3.1, Codestral, Grok 4.1 Fast, 4.20 y 4.3 (4.6, oculto), DeepSeek V4.1 Flash, V4 Pro, V4 Flash y V3.2, Kimi K2.5, K2.6 y K2.7 Code, gpt-oss-120b, MAI-Thinking-1, Command A | `llm/foundry.py`: SDK `openai` con esa URL base y Entra ID (rol **Azure AI User**); jugada en texto («Jugada: <SAN>») y, en el juego de fotos, JSON dentro del texto validado con el mismo esquema |
+
+Todos los deployments son de pago por uso (GlobalStandard, DataZoneStandard o Standard; sin coste fijo), creados
+con la CLI con capacidad baja:
+
+```bash
+az cognitiveservices account deployment create -g rg-mea-culpa -n meaculpa-fc-7952 --deployment-name Mistral-Large-3   --model-name Mistral-Large-3 --model-version 1 --model-format "Mistral AI" --sku-name GlobalStandard --sku-capacity 20
+```
+
+Cada modelo se ha probado de verdad antes de entrar: una partida corta de ajedrez (6 jugadas con el código de la API)
+y dos fotos del juego. Los descartados y el motivo están en el docstring de `models.py`. Además de las cuotas por
+persona, hay un **fusible de gasto diario** entre las dos demos: `GLOBAL_LLM_CENTS_PER_DAY` (50 = 0,50 USD; cuota
+`ia_centimos_dia` en /admin) y `USER_LLM_CENTS_PER_DAY` por persona (20; cuota `ia_centimos_usuario`), que suman el
+coste real de cada llamada según sus tokens.
+
+### Rankings
+
+`backend/meaculpa/ranking.py`. Al terminar una partida (las cinco fotos, o mate, tablas o abandono en el ajedrez), el
+servidor guarda el resultado que ha calculado él en Azure SQL (`ranking_partidas`, migración `002_ranking.sql`; permisos
+en `infra/sql/002_ranking_permisos.sql`), por la cola en segundo plano de `db.py`, y rehace una foto fija del ranking
+en Blob (`ranking/geo.json`, `ranking/meaculpa.json`). `GET /api/ranking/geo` y `GET /api/ranking/meaculpa` son
+públicos y solo leen esa foto fija (caché de 60 s), así que mirar el ranking nunca despierta la base de datos.
+`POST /api/ranking/preferencia` guarda la casilla «Salir en el ranking con mi nombre» (marcada por defecto; también va
+en el cuerpo de cada partida nueva como `ranking`). El nombre es el de pila del token de Google verificado; sin correo
+ni foto. `RankingStore.export_rows()` saca todas las filas para migrarlas a otro almacén.
 
 Otras variables: `GOOGLE_CLIENT_ID` (obligatoria), `CORS_ORIGINS`, `AZURE_STORAGE_ACCOUNT_URL` +
 `AZURE_STORAGE_CONTAINER`, `STOCKFISH_PATH`, `ANALYSIS_DEPTH` (3), `STOCKFISH_ANALYSIS_DEPTH` (14),

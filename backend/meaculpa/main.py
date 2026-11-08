@@ -49,8 +49,9 @@ from .geo.config import GeoSettings, get_geo_settings
 from .geo.photos import PhotoSet
 from .llm import LLMProvider, get_provider
 from .llm_player import MetricsStore
-from .models import CATALOG_BY_ID, build_model_providers, model_catalog
+from .models import CATALOG_BY_ID, MODEL_CATALOG, build_model_providers, model_catalog, model_label
 from .quota import UsageLimiter
+from .ranking import RankingStore, chess_rival, create_ranking_router
 from .storage import ObjectStore, make_object_store
 
 log = logging.getLogger("meaculpa")
@@ -80,6 +81,7 @@ class OpponentConfig(BaseModel):
 class NewGameRequest(BaseModel):
     opponent: OpponentConfig
     user_color: Literal["white", "black"] = "white"
+    ranking: bool = True  # casilla «Salir en el ranking con mi nombre» (marcada por defecto)
 
 
 class MoveRequest(BaseModel):
@@ -182,6 +184,9 @@ def create_app(
         azure_costs = AzureCosts(fetch, settings.azure_budget_eur)
     store = GameStore(objects)
     limiter = UsageLimiter(objects, settings, overrides=data.quota)
+    ranking = RankingStore(data.db, objects)
+    # Modelos que juegan al ajedrez (los del catálogo marcados `ajedrez` y los de fuera del catálogo, como el mock).
+    chess_ids = {m for m in models if m not in CATALOG_BY_ID or CATALOG_BY_ID[m].ajedrez}
     metrics = MetricsStore(settings.data_dir / "llm_moves.jsonl")
     analysis_slots = threading.BoundedSemaphore(max(1, settings.max_concurrent_analyses))
     _setup_telemetry()
@@ -225,7 +230,17 @@ def create_app(
     app.state.data = data
 
     def _usable(model_id: str) -> bool:
-        return model_id in models and data.model_enabled(model_id)
+        return model_id in chess_ids and data.model_enabled(model_id)
+
+    def _rank(user: User, game: GameRecord) -> None:
+        """Partida terminada (jaque mate, tablas o abandono) al ranking, con el resultado que da el servidor."""
+        if game.status != "terminada" or game.resultado_usuario not in ("victoria", "tablas", "derrota"):
+            return
+        rival, rival_name = chess_rival(game.opponent)
+        try:
+            ranking.record("meaculpa", game.id, user, rival=rival, rival_name=rival_name, result=game.resultado_usuario)
+        except Exception:  # noqa: BLE001 - el ranking nunca rompe la partida
+            log.exception("No se pudo guardar la partida %s en el ranking", game.id)
 
     def _record(user: User, tipo: str, **kw: Any) -> None:
         try:
@@ -250,12 +265,19 @@ def create_app(
         if game.opponent.get("type") == "llm":
             if not data.model_enabled(model_id):
                 raise HTTPException(503, "Ese modelo está desactivado ahora mismo; empieza otra partida con otro rival")
+            limiter.check_budget(user.owner)
             limiter.consume(user.owner, "jugadas_llm")
             limiter.consume_llm_calls(1 + settings.llm_max_retries)  # peor caso: todos los reintentos
         llm = models.get(model_id, provider)
         opp = build_opponent(game.opponent, llm, metrics, settings.llm_max_retries)
         t0 = time.perf_counter()
-        decision = opp.choose_move(board)
+        try:
+            decision = opp.choose_move(board)
+        except Exception as exc:  # noqa: BLE001 - error del proveedor (red, 4xx/5xx): la jugada no se guarda
+            if game.opponent.get("type") != "llm":
+                raise
+            log.warning("El modelo %s no ha respondido: %s", model_id, exc)
+            raise HTTPException(503, "El modelo no ha respondido. Vuelve a hacer tu jugada en unos segundos.") from exc
         meta = dict(decision.meta)
         meta["ms"] = round((time.perf_counter() - t0) * 1000)
         if decision.move not in board.legal_moves:  # defensa en profundidad: nunca debería pasar
@@ -267,6 +289,7 @@ def create_app(
         finish_if_over(game, board)
         if game.opponent.get("type") == "llm":
             reg = meta.get("registro") or {}
+            limiter.add_cost(float(reg.get("cost_usd", 0.0) or 0.0), user.owner)
             _record(
                 user,
                 "jugada_ia",
@@ -290,6 +313,7 @@ def create_app(
         if not analysis_slots.acquire(timeout=5):
             raise HTTPException(503, "Hay otro análisis en marcha; vuelve a intentarlo en unos segundos")
         try:
+            limiter.check_budget(user.owner)
             limiter.consume(user.owner, "analisis")
             limiter.consume_llm_calls(1)
             yield time.monotonic() + settings.analysis_timeout_s
@@ -325,7 +349,7 @@ def create_app(
         return {"modelos": _catalog(), "por_defecto": default_model, "demo_activa": data.demo_enabled("meaculpa")}
 
     def _catalog() -> list[dict[str, Any]]:
-        rows = model_catalog(models, default_model)
+        rows = model_catalog(models, default_model, only={m.id for m in MODEL_CATALOG if m.ajedrez})
         for row in rows:
             row["disponible"] = row["disponible"] and data.model_enabled(row["id"])
         return rows
@@ -339,8 +363,7 @@ def create_app(
             if not _usable(model_id):
                 raise HTTPException(400, "Ese modelo no está disponible ahora mismo")
             cfg["model"] = model_id
-            spec = CATALOG_BY_ID.get(model_id)
-            cfg["modelo_etiqueta"] = f"{spec.etiqueta}, {spec.descripcion.lower()}" if spec else models[model_id].name
+            cfg["modelo_etiqueta"] = model_label(model_id, models[model_id].name)
         else:
             cfg.pop("model", None)
         if req.opponent.type == "stockfish" and not find_stockfish():
@@ -351,6 +374,7 @@ def create_app(
         )
         board = game.board()
         _record(user, "partida", ref=game.id, modelo=cfg.get("model"))
+        ranking.set_preference(user, req.ranking)
         if game.user_chess_color == chess.BLACK:
             _opponent_move(user, game, board)
         _save(game)
@@ -400,6 +424,7 @@ def create_app(
         if game.status == "en_curso":
             _opponent_move(user, game, board)
         _save(game)
+        _rank(user, game)
         return game_state(game)
 
     @app.post(API_PREFIX + "/games/{game_id}/resign")
@@ -411,6 +436,7 @@ def create_app(
             game.motivo_fin = "abandono"
             game.result = "0-1" if game.user_color == "white" else "1-0"
             _save(game)
+            _rank(user, game)
         return game_state(game)
 
     def _analysis_payload(game: GameRecord) -> dict[str, Any]:
@@ -435,6 +461,7 @@ def create_app(
                 game.resultado_usuario or "", "en curso"
             )
             diag = diagnose(analysis, provider, game.pgn(), result_text, history, settings=settings)
+            limiter.add_cost(diag.coste_usd, user.owner)
         _record(
             user,
             "analisis",
@@ -475,6 +502,7 @@ def create_app(
             history = history_counts([], analysis.patrones_partida)
             pgn = pgn_without_comments(pgn_game)
             diag = diagnose(analysis, provider, pgn, "desconocido", history, settings=settings)
+            limiter.add_cost(diag.coste_usd, user.owner)
         _record(
             user,
             "analisis_pgn",
@@ -503,8 +531,12 @@ def create_app(
             geo_settings=geo_settings,
             photos=geo_photos,
             data=data,
+            ranking=ranking,
+            budget=limiter,
         )
     )
+    app.include_router(create_ranking_router(current_user=current_user, ranking=ranking))
+    app.state.ranking = ranking
     app.include_router(create_contact_router(data=data, settings=settings))
     app.include_router(
         create_admin_router(
@@ -516,6 +548,8 @@ def create_app(
             quota_defaults={
                 **limiter.limits,
                 "llm_global": settings.global_llm_calls_per_day,
+                "ia_centimos_dia": settings.global_llm_cents_per_day,
+                "ia_centimos_usuario": settings.user_llm_cents_per_day,
                 "geo_partidas": geo_settings.quota_games_per_day,
                 "geo_ia": geo_settings.quota_llm_per_day,
                 "geo_global": geo_settings.global_llm_per_day,

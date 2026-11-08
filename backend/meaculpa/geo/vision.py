@@ -7,6 +7,9 @@ incluye la imagen:
 
 - Azure OpenAI / Foundry (`kind` "azure" u "openai"): Chat Completions con una parte `image_url` en
   base64 y `response_format` = esquema pydantic (`chat.completions.parse`).
+- Modelos de Foundry sin salida estructurada (`kind` "foundry", endpoint de inferencia de modelos, o los de la
+  API v1 con `structured_output="off"`): la misma imagen y las instrucciones piden un objeto JSON en el texto,
+  que se extrae (sin el razonamiento entre <think>) y se valida con el mismo esquema pydantic.
 - Claude en Foundry (`kind` "claude"): Messages API con un bloque `image` en base64 y
   `output_config.format` (JSON Schema).
 - Mock (`kind` "mock-geo"): no mira la imagen; responde algo determinista para probar todo sin red.
@@ -19,6 +22,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+import re
 import time
 from typing import Any
 
@@ -35,6 +40,11 @@ SYSTEM_PROMPT = (
     "con las pistas que has usado)."
 )
 USER_PROMPT = "¿Dónde se hizo esta foto?"
+JSON_PROMPT = (
+    " Responde SOLO con un objeto JSON, sin texto antes ni después, con estas claves: "
+    '{"pais": "...", "region": "...", "lat": 0.0, "lon": 0.0, "confianza": 0.0, "razonamiento_breve": "..."}'
+)
+_JSON_OBJECT = re.compile(r"\{.*\}", re.S)
 
 
 def _messages_text() -> tuple[str, str]:
@@ -45,8 +55,10 @@ def locate(provider: Any, image: bytes, mime: str = "image/jpeg", detail: str = 
     kind = getattr(provider, "kind", "")
     if hasattr(provider, "locate"):  # mock u otros proveedores nativos de imagen
         return provider.locate(image, mime)
-    if kind in ("azure", "openai"):
-        return _locate_openai(provider, image, mime, detail)
+    if kind in ("azure", "openai", "foundry"):
+        if getattr(provider, "supports_structured", True):
+            return _locate_openai(provider, image, mime, detail)
+        return _locate_text(provider, image, mime)
     if kind == "claude":
         return _locate_claude(provider, image, mime)
     raise TypeError(f"El proveedor {kind!r} no admite imágenes")
@@ -93,6 +105,51 @@ def _locate_openai(provider: Any, image: bytes, mime: str, detail: str) -> LLMRe
         model=completion.model or provider.name,
         error=f"rechazo: {msg.refusal}" if getattr(msg, "refusal", None) else None,
     )
+
+
+def parse_json_guess(text: str) -> tuple[GeoGuess | None, str | None]:
+    """Busca el objeto JSON de la respuesta (sin bloques <think> ni ```json) y lo valida."""
+    from ..llm.foundry import strip_reasoning
+
+    clean = strip_reasoning(text).replace("```json", "").replace("```", "")
+    m = _JSON_OBJECT.search(clean)
+    if not m:
+        return None, "sin objeto JSON en la respuesta"
+    try:
+        data = json.loads(m.group(0))
+        if isinstance(data, dict):
+            data = {k: data[k] for k in GeoGuess.model_fields if k in data}  # sin claves de más
+        return GeoGuess.model_validate(data), None
+    except (ValidationError, ValueError, TypeError) as exc:
+        return None, f"{type(exc).__name__}: {str(exc)[:200]}"
+
+
+def _locate_text(provider: Any, image: bytes, mime: str) -> LLMResult[GeoGuess]:
+    """Modelos sin `response_format` con esquema: JSON pedido en las instrucciones y validado aquí."""
+    data_url = f"data:{mime};base64,{base64.b64encode(image).decode()}"
+    system, user = _messages_text()
+    messages = [
+        {"role": "system", "content": system + JSON_PROMPT},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": user},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        },
+    ]
+    t0 = time.perf_counter()
+    completion = provider._client.chat.completions.create(
+        model=provider.model, messages=messages, **provider.generation_kwargs(None)
+    )
+    latency = (time.perf_counter() - t0) * 1000
+    tin, tout = provider._usage(completion)
+    choice = completion.choices[0]
+    raw = choice.message.content or ""
+    parsed, error = parse_json_guess(raw)
+    if parsed is None and choice.finish_reason == "length":
+        error = "max_tokens agotado antes de responder"
+    return LLMResult(parsed, raw, tin, tout, latency, completion.model or provider.name, error)
 
 
 def _locate_claude(provider: Any, image: bytes, mime: str) -> LLMResult[GeoGuess]:
