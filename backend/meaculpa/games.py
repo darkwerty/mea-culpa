@@ -1,13 +1,12 @@
-"""Partidas: estado, rivales y persistencia en ficheros JSON (suficiente para un solo usuario)."""
+"""Partidas: estado, rivales y persistencia por usuario (Blob Storage en Azure, ficheros en local)."""
 
 from __future__ import annotations
 
 import json
-import threading
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import Any
 
 import chess
@@ -16,6 +15,9 @@ import chess.pgn
 from .engines import GreedyOpponent, MinimaxOpponent, RandomOpponent, StockfishOpponent, find_stockfish
 from .llm.base import LLMProvider
 from .llm_player import LLMOpponent, MetricsStore
+from .storage import ObjectStore
+
+_HEX = re.compile(r"^[0-9a-f]{12,64}$")
 
 TERMINATIONS = {
     chess.Termination.CHECKMATE: "jaque mate",
@@ -43,6 +45,8 @@ class GameRecord:
     analysis: dict[str, Any] | None = None
     diagnosis: dict[str, Any] | None = None
     patrones: list[str] = field(default_factory=list)
+    owner: str = ""  # sha256 del `sub` de Google: nunca el email
+    etag: str | None = field(default=None, repr=False, compare=False)  # no se guarda
 
     @property
     def user_chess_color(self) -> chess.Color:
@@ -68,41 +72,60 @@ class GameRecord:
         return str(game)
 
 
+class GameConflictError(Exception):
+    """La partida cambió entre la lectura y la escritura (dos peticiones a la vez)."""
+
+
 class GameStore:
-    def __init__(self, data_dir: Path) -> None:
-        self.dir = data_dir / "games"
-        self.dir.mkdir(parents=True, exist_ok=True)
-        self._cache: dict[str, GameRecord] = {}
-        self._lock = threading.Lock()
+    """Partidas por usuario: `games/{owner}/{id}.json`. `owner` es un hash del `sub` de Google."""
+
+    RECENT_LIMIT = 50
+
+    def __init__(self, objects: ObjectStore) -> None:
+        self.objects = objects
+
+    @staticmethod
+    def _key(owner: str, game_id: str) -> str:
+        if not _HEX.match(owner) or not _HEX.match(game_id):
+            raise ValueError("Identificador no válido")
+        return f"games/{owner}/{game_id}.json"
 
     def save(self, game: GameRecord) -> None:
-        with self._lock:
-            self._cache[game.id] = game
-            path = self.dir / f"{game.id}.json"
-            path.write_text(json.dumps(asdict(game), ensure_ascii=False, indent=1), encoding="utf-8")
+        data = {k: v for k, v in asdict(game).items() if k != "etag"}
+        raw = json.dumps(data, ensure_ascii=False, indent=1).encode("utf-8")
+        key = self._key(game.owner, game.id)
+        new_etag = self.objects.write(key, raw, etag=game.etag)
+        if new_etag is None:
+            raise GameConflictError(game.id)
+        game.etag = new_etag
 
-    def get(self, game_id: str) -> GameRecord | None:
-        if game_id in self._cache:
-            return self._cache[game_id]
-        if not all(c in "0123456789abcdef" for c in game_id):
+    def get(self, owner: str, game_id: str) -> GameRecord | None:
+        if not _HEX.match(game_id or ""):
             return None
-        path = self.dir / f"{game_id}.json"
-        if not path.exists():
+        found = self.objects.read(self._key(owner, game_id))
+        if found is None:
             return None
-        game = GameRecord(**json.loads(path.read_text(encoding="utf-8")))
-        self._cache[game.id] = game
+        raw, etag = found
+        game = GameRecord(**json.loads(raw.decode("utf-8")))
+        if game.owner != owner or game.id != game_id:  # defensa en profundidad
+            return None
+        game.etag = etag
         return game
 
-    def all(self) -> list[GameRecord]:
+    def recent(self, owner: str, limit: int = RECENT_LIMIT) -> list[GameRecord]:
+        """Las partidas más recientes del usuario (como mucho `limit`, para acotar lecturas)."""
+        if not _HEX.match(owner):
+            raise ValueError("Identificador no válido")
+        listed = sorted(self.objects.list(f"games/{owner}"), key=lambda kv: kv[1], reverse=True)[:limit]
         games = []
-        for path in self.dir.glob("*.json"):
-            g = self.get(path.stem)
-            if g:
-                games.append(g)
+        for key, _ in listed:
+            game = self.get(owner, key.rsplit("/", 1)[-1].removesuffix(".json"))
+            if game:
+                games.append(game)
         return sorted(games, key=lambda g: g.created, reverse=True)
 
-    def previous_patterns(self, exclude_id: str) -> list[list[str]]:
-        return [g.patrones for g in self.all() if g.id != exclude_id and g.analysis is not None]
+    def previous_patterns(self, owner: str, exclude_id: str) -> list[list[str]]:
+        return [g.patrones for g in self.recent(owner) if g.id != exclude_id and g.analysis is not None]
 
 
 def new_game_id() -> str:

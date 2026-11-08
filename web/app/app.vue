@@ -3,10 +3,15 @@ import type { GameState } from '~/composables/useApi'
 import { applyUci, parseFen } from '~/utils/fen'
 
 const api = useApi()
+const auth = useAuth()
+const session = auth.session
+const PRIVACY_URL = 'https://danielalonso.dev/privacidad'
+const TERMS_URL = 'https://danielalonso.dev/terminos'
+const CONTACT = 'hola@danielalonso.dev'
 
-const health = ref<any>(null)
 const catalog = ref<any>(null)
 const apiError = ref<string | null>(null)
+const loginButton = ref<HTMLElement | null>(null)
 
 const mode = ref<'llm' | 'clasico'>('clasico')
 const classicId = ref('minimax')
@@ -35,16 +40,17 @@ async function refreshSide() {
   }
 }
 
-onMounted(async () => {
+async function loadAfterLogin() {
+  apiError.value = null
   try {
-    health.value = await api.health()
     catalog.value = await api.opponents()
   } catch (e: any) {
-    apiError.value = `No se puede conectar con la API (${e.message}). ¿Está arrancada en el puerto 8000?`
+    if (session.value) apiError.value = `No se puede conectar con la API (${e.message}).`
+    return
   }
   // ?game=<id> recupera una partida (y su diagnóstico) tras recargar la página
   const gid = new URL(window.location.href).searchParams.get('game')
-  if (gid && !apiError.value) {
+  if (gid && !game.value) {
     try {
       game.value = await api.game(gid)
       userColor.value = game.value.user_color
@@ -54,6 +60,31 @@ onMounted(async () => {
     }
   }
   refreshSide()
+}
+
+onMounted(() => {
+  auth.restore() // si había sesión, el watch de abajo carga los datos
+})
+
+// Al entrar con Google se carga todo; al salir (o si caduca la sesión) se limpia lo del usuario.
+watch(
+  () => session.value?.token,
+  (token, previous) => {
+    if (token && token !== previous) {
+      loadAfterLogin()
+    } else if (!token) {
+      catalog.value = null
+      game.value = null
+      diagnosis.value = null
+      history.value = []
+      metrics.value = []
+    }
+  },
+)
+
+// El botón de Google se pinta cada vez que aparece su contenedor (al cargar o tras cerrar sesión).
+watch(loginButton, (el) => {
+  if (el) auth.renderButton(el)
 })
 
 watch(
@@ -165,15 +196,34 @@ const userTurn = computed(() => !!game.value && game.value.legal_moves.length > 
         Juega una partida y te digo, en castellano, <strong>por qué la has perdido</strong>. El motor encuentra los errores; la IA
         solo los explica.
       </p>
-      <p v-if="health" class="faint">
-        LLM: <span class="pill">{{ health.llm.proveedor }} · {{ health.llm.modelo }}</span>
-        &nbsp;Análisis: <span class="pill">{{ health.motor_analisis }}</span>
-        &nbsp;Stockfish: <span class="pill">{{ health.stockfish ? 'disponible' : 'no instalado' }}</span>
+      <p v-if="catalog" class="faint">
+        LLM: <span class="pill">{{ catalog.llm.proveedor }} · {{ catalog.llm.modelo }}</span>
+        &nbsp;Análisis: <span class="pill">{{ catalog.motor_analisis }}</span>
+        &nbsp;Stockfish: <span class="pill">{{ catalog.stockfish ? 'disponible' : 'no instalado' }}</span>
+      </p>
+      <p v-if="session" class="faint who">
+        <img v-if="session.picture" :src="session.picture" alt="" class="avatar" referrerpolicy="no-referrer" />
+        Hola, {{ session.name ?? 'jugador' }}
+        <button v-if="!auth.localMode" class="link-btn" @click="auth.signOut()">Cerrar sesión</button>
       </p>
       <p v-if="apiError" class="alert">{{ apiError }}</p>
     </header>
 
-    <main class="grid">
+    <section v-if="!session" class="panel login">
+      <p class="eyebrow">Entra para jugar</p>
+      <p class="muted">
+        Tus partidas y tus patrones de error se guardan a tu nombre para poder decirte «otra vez has perdido por…». Solo
+        se usa tu cuenta de Google para identificarte; nadie más ve tus partidas.
+      </p>
+      <div ref="loginButton" class="gsi-button" />
+      <p class="faint small">
+        Al continuar aceptas las <a :href="TERMS_URL" target="_blank" rel="noopener">condiciones de uso</a> y la
+        <a :href="PRIVACY_URL" target="_blank" rel="noopener">política de privacidad</a>.
+      </p>
+      <p v-if="auth.authError.value" class="alert">{{ auth.authError.value }}</p>
+    </section>
+
+    <main v-else class="grid">
       <section class="board-col">
         <ChessBoard
           :pieces="pieces"
@@ -340,7 +390,14 @@ const userTurn = computed(() => !!game.value && game.value.legal_moves.length > 
     </main>
 
     <footer class="faint foot">
-      Mea culpa · proyecto de <a href="https://danielalonso.dev">Daniel Alonso</a> · python-chess + FastAPI + Nuxt · Microsoft Foundry
+      <p>
+        Mea culpa · proyecto de <a href="https://danielalonso.dev">Daniel Alonso</a> · python-chess + FastAPI + Nuxt ·
+        Microsoft Foundry
+      </p>
+      <p>
+        <a :href="PRIVACY_URL">Privacidad</a> · <a :href="TERMS_URL">Condiciones</a> · Contacto:
+        <a :href="`mailto:${CONTACT}`">{{ CONTACT }}</a>
+      </p>
     </footer>
   </div>
 </template>
@@ -543,5 +600,40 @@ const userTurn = computed(() => !!game.value && game.value.legal_moves.length > 
 .foot {
   margin-top: 3rem;
   text-align: center;
+}
+.foot p {
+  margin: 0.25rem 0;
+}
+.login {
+  max-width: 560px;
+  margin-top: 1.5rem;
+  display: grid;
+  gap: 0.75rem;
+}
+.login p {
+  margin: 0;
+}
+.gsi-button {
+  min-height: 44px;
+}
+.who {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+}
+.link-btn {
+  border: 0;
+  background: none;
+  color: var(--link);
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
 }
 </style>

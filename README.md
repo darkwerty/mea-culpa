@@ -25,7 +25,7 @@ El script de evaluación está listo para repetirse contra un modelo real de Fou
 
 | Qué | Resultado |
 |---|---|
-| Tests | **36 tests en verde** (`pytest`): validación de jugadas, reintentos/fallback, mates en 1 y 2, detección de errores, validación de la salida del LLM, API y cliente de Azure con red simulada |
+| Tests | **90 tests en verde** (`pytest`): validación de jugadas, reintentos/fallback, mates en 1 y 2, detección de errores, validación de la salida del LLM, API, cliente de Azure con red simulada, login con Google (tokens firmados de prueba), aislamiento entre usuarios, cuotas y almacén Blob simulado |
 | Detección de errores en partidas históricas | En las miniaturas, la mayor caída del motor es el error clásico: **5…Bxd1??** en el mate de Légal, **2.g4??** en el mate del loco, **3…Nf6??** en el del pastor. En las partidas largas, el alfa-beta a profundidad 3 no siempre coincide con el análisis histórico (en la Siempreviva marca 7…d3 y no 19…Qxf3); con Stockfish sería más fiable |
 | Jugadas ilegales del LLM (mock) | 4,8 % a temperatura 0 · 24,5 % a 0,7 · 48,1 % a 1,2 — sin una sola jugada ilegal en el tablero gracias a la validación con python-chess |
 | Coste por diagnóstico | ~750 tokens de entrada + ~200 de salida ≈ **0,0005 $** con precios tipo gpt-4.1-mini (estimado; configurable) |
@@ -90,31 +90,65 @@ flowchart LR
    «recurrentes» sin respaldo en el historial **se descartan y se cuentan** (se ven en la página y en la evaluación).
 
 El PGN y cualquier texto del usuario son **datos no fiables**: van entre etiquetas (`<partida_pgn>`, `<hechos_motor>`),
-se les quitan `<` y `>` para que no puedan cerrar las etiquetas, se exportan sin comentarios y el prompt de sistema
-dice explícitamente que cualquier instrucción dentro de ellos se ignora.
+se les quitan `<` y `>` para que no puedan cerrar las etiquetas, y el PGN se **reconstruye** solo con la línea
+principal: sin comentarios, sin variantes y sin cabeceras de texto libre (`Event`, `White`, `Annotator`…), que son
+otra vía de inyección; solo se conservan `FEN`/`SetUp` (validados por python-chess) y `Result` (lista cerrada). El
+prompt de sistema dice además que cualquier instrucción dentro de los datos se ignora, y la interfaz pinta la salida
+del LLM siempre como texto (nunca `v-html`).
+
+## Seguridad y límites de la demo pública
+
+- **Login con Google** (Google Identity Services, botón «Continuar con Google», flujo de ID token, sin client
+  secret). El frontend manda el ID token en `Authorization: Bearer`; la API (`backend/meaculpa/auth.py`) lo verifica
+  con `google.oauth2.id_token.verify_oauth2_token` (firma con las claves públicas de Google, cacheadas una hora,
+  `aud` = `GOOGLE_CLIENT_ID`, `iss`, `exp`) y comprueba además `email_verified == true`. Todas las rutas salvo
+  `/api/health` lo exigen. **Sin `GOOGLE_CLIENT_ID` la API no arranca** y no hay ningún modo sin login activable por
+  variable de entorno.
+- **Cada usuario solo ve lo suyo.** Las partidas se guardan en `games/{sha256(sub)}/{id}.json`: ni el correo ni el
+  `sub` en claro llegan al almacenamiento ni a los logs. Una partida de otro usuario devuelve 404, y el «otra vez has
+  perdido por…» solo cuenta tus partidas.
+- **Cuotas diarias por usuario** (persistidas en Blob, válidas para todas las réplicas): 30 partidas, 1500 jugadas,
+  200 jugadas contra la IA y 20 análisis. **Fusible global** de 3000 llamadas al LLM al día (cada jugada del LLM
+  reserva el peor caso, 1 + `LLM_MAX_RETRIES`). Todo configurable (`QUOTA_*`, `GLOBAL_LLM_CALLS_PER_DAY`).
+- **El análisis no puede tumbar la API**: como mucho 200 plies (`MAX_ANALYSIS_PLIES`) y 20 000 caracteres de PGN,
+  un análisis a la vez por réplica (los demás reciben 503 en 5 s) y 90 s de tiempo máximo (`ANALYSIS_TIMEOUT_S`).
+- **Cabeceras**: la API no publica `/docs` ni `/openapi.json` y responde con `nosniff`, `frame-ancestors 'none'` y
+  `no-store`. CORS solo admite orígenes exactos (`CORS_ORIGINS` rechaza `*`). El frontend se publica con un
+  `staticwebapp.config.json` generado tras `nuxt generate` (`web/scripts/swa-config.mjs`): CSP con los scripts en
+  línea de Nuxt permitidos por hash, Google Identity Services y `connect-src` limitado a la URL de la API,
+  `frame-ancestors 'none'`, `nosniff`, `Referrer-Policy` y HSTS.
+- Junto al botón de login y en el pie: [privacidad](https://danielalonso.dev/privacidad),
+  [condiciones](https://danielalonso.dev/terminos) y contacto en hola@danielalonso.dev.
 
 ## Ejecutarlo en local (modo mock, sin Azure)
 
 Requisitos: Python 3.11+ y Node 20+.
 
 ```bash
-# API
+# API (servidor de desarrollo: un único usuario local, sin cuenta de Google)
 python -m venv .venv
-.venv/Scripts/python -m pip install -r requirements-dev.txt        # en Linux/macOS: .venv/bin/python
-.venv/Scripts/python -m uvicorn meaculpa.main:create_app --factory --app-dir backend --port 8000
+.venv/Scripts/python -m pip install -r requirements-dev.txt -c constraints.txt   # en Linux/macOS: .venv/bin/python
+.venv/Scripts/python -m uvicorn dev_server:app --app-dir backend --port 8000
 
-# Frontend (otra terminal)
+# Frontend (otra terminal). Sin NUXT_PUBLIC_GOOGLE_CLIENT_ID entra en «modo local» sin botón de login.
 cd web
 npm install
 npm run dev            # http://localhost:3000
 ```
+
+`backend/dev_server.py` acepta cualquier petición como un usuario local. Está fuera del paquete `meaculpa` y el
+`Dockerfile` no lo copia, así que no existe en la imagen desplegada. Para probar el login real en local, crea un
+cliente OAuth web con `http://localhost:3000` como origen autorizado y arranca la API normal
+(`uvicorn meaculpa.main:create_app --factory --app-dir backend`) con `GOOGLE_CLIENT_ID` y el frontend con
+`NUXT_PUBLIC_GOOGLE_CLIENT_ID`.
 
 Por defecto `LLM_PROVIDER=mock`: un proveedor simulado que lee los mismos prompts que vería el modelo real (FEN, hechos
 del motor) y responde con el mismo esquema. Para jugar propone a veces jugadas ilegales (más cuanta más temperatura),
 y para el diagnóstico rellena plantillas en español con los hechos. Sirve para probarlo todo de punta a punta, no para
 juzgar la calidad de las explicaciones.
 
-Las partidas y métricas se guardan en `data/runtime/` (ignorado por git).
+En local las partidas y cuotas se guardan en `data/runtime/store/` y las métricas en `data/runtime/` (ignorado por
+git). En Azure, partidas y cuotas van a Blob Storage (`AZURE_STORAGE_ACCOUNT_URL`, con la identidad administrada).
 
 ```bash
 .venv/Scripts/python -m pytest -q        # tests
@@ -148,8 +182,12 @@ Las llamadas usan `chat.completions.parse(response_format=<modelo pydantic>)`.
 Los tests comprueban este cliente sin red: un transporte HTTP falso verifica la URL, la cabecera `Authorization: Bearer`,
 el `response_format` JSON Schema y el parseo. **No se ha probado contra un recurso real de Azure.**
 
-Otras variables: `STOCKFISH_PATH`, `ANALYSIS_DEPTH` (3), `STOCKFISH_ANALYSIS_DEPTH` (14), `LLM_MAX_RETRIES` (3),
-`MEA_CULPA_DATA_DIR`, `CORS_ORIGINS`, `APPLICATIONINSIGHTS_CONNECTION_STRING` (+ paquete `azure-monitor-opentelemetry`).
+Otras variables: `GOOGLE_CLIENT_ID` (obligatoria), `CORS_ORIGINS`, `AZURE_STORAGE_ACCOUNT_URL` +
+`AZURE_STORAGE_CONTAINER`, `STOCKFISH_PATH`, `ANALYSIS_DEPTH` (3), `STOCKFISH_ANALYSIS_DEPTH` (14),
+`LLM_MAX_RETRIES` (3), `MEA_CULPA_DATA_DIR`, `QUOTA_GAMES_PER_DAY` (30), `QUOTA_MOVES_PER_DAY` (1500),
+`QUOTA_LLM_MOVES_PER_DAY` (200), `QUOTA_ANALYSES_PER_DAY` (20), `GLOBAL_LLM_CALLS_PER_DAY` (3000),
+`MAX_ANALYSIS_PLIES` (200), `MAX_CONCURRENT_ANALYSES` (1), `ANALYSIS_TIMEOUT_S` (90),
+`APPLICATIONINSIGHTS_CONNECTION_STRING` (+ paquete `azure-monitor-opentelemetry`).
 
 ## Evaluación
 
@@ -171,24 +209,57 @@ miniaturas de ejemplo; todas de dominio público) mide:
 Escribe la tabla en `eval/resultados_<proveedor>.md`. En mock la coincidencia es 100 % por construcción (el mock elige
 siempre la mayor caída); el número interesante saldrá al ejecutarlo contra uno o varios deployments de Foundry.
 
-## Infraestructura como código (escrita, no desplegada)
+## Infraestructura y despliegue
 
-`infra/main.bicep` + `infra/main.bicepparam` (compilan sin avisos con `az bicep build` y `az bicep lint`):
+`infra/main.bicep` + `infra/main.bicepparam` (compilan sin avisos con `az bicep build` y `az bicep lint`), todo en
+**francecentral** (la política de la suscripción no admite otras regiones) salvo la Static Web App, fija en
+`centralus`:
 
-- **Azure Container Apps** (plan Consumption) para la API, `minReplicas: 0` → escala a cero.
+- **Azure Container Apps** (plan Consumption) para la API, `minReplicas: 0` → escala a cero; `maxReplicas: 1` como
+  tope de coste (el estado está en Blob, así que se puede subir con `apiMaxReplicas`).
 - **Recurso de Microsoft Foundry** (`Microsoft.CognitiveServices/accounts`, kind `AIServices`) con `disableLocalAuth`
   y un **deployment del modelo** (`gpt-4.1-mini`, GlobalStandard, 10K TPM; parametrizable).
-- **Identidad administrada** asignada por el usuario con el rol *Cognitive Services OpenAI User* sobre ese recurso.
+- **Storage account** (Standard_LRS, sin claves compartidas ni acceso público) con un contenedor para partidas y
+  cuotas; los contadores diarios se borran solos a los 30 días.
+- **Identidad administrada** asignada por el usuario con *Cognitive Services OpenAI User* sobre Foundry y *Storage
+  Blob Data Contributor* sobre la cuenta de almacenamiento.
 - **Log Analytics + Application Insights** (con tope diario de ingesta de 1 GB).
-- **Static Web Apps (Free)** para el frontend (`nuxt generate` → `web/.output/public`).
-- **Presupuesto mensual** con alertas al 50 % y 90 % (real) y al 100 % (previsto).
+- **Static Web Apps (Free)** para el frontend y, en un segundo despliegue, el dominio `meaculpa.danielalonso.dev`.
+- **Presupuesto mensual** (desde 2026-11-01) con alertas al 50 % y 90 % (real) y al 100 % (previsto) a
+  admin@example.com.
 
-`Dockerfile` para la imagen de la API (no construida ni publicada). No incluye un Azure Container Registry para no
-sumar su coste fijo; la idea es publicar la imagen en GHCR.
+La imagen (`Dockerfile`, dependencias fijadas con `constraints.txt`) se publica en GHCR; no hay Azure Container
+Registry para no sumar su coste fijo. `.github/workflows/ci.yml` (permisos de solo lectura, acciones fijadas por SHA)
+pasa ruff y pytest, construye la imagen y comprueba que no arranca sin `GOOGLE_CLIENT_ID`, y ejecuta `nuxt generate`.
+`.github/workflows/deploy.yml` despliega en cada push a `main`: imagen a GHCR → `az deployment group create` (login
+OIDC, sin secretos) → `nuxt generate` con la URL de la API → Static Web App.
+
+### Primer despliegue (pasos manuales, una vez)
+
+1. Registrar los proveedores (desde una sesión con permisos sobre la suscripción):
+   `az provider register -n <ns> --wait` para `Microsoft.CognitiveServices`, `Microsoft.App`,
+   `Microsoft.OperationalInsights`, `Microsoft.Insights`, `Microsoft.ManagedIdentity`, `Microsoft.Storage` y
+   `Microsoft.Web`.
+2. `az group create -n rg-mea-culpa -l francecentral`.
+3. App registration para GitHub con credencial federada `repo:darkwerty/mea-culpa:ref:refs/heads/main`, con rol
+   *Contributor* + *Role Based Access Control Administrator* (o *Owner*) sobre el grupo: el Bicep crea asignaciones
+   de rol.
+4. Cliente OAuth web de Google con orígenes autorizados `https://meaculpa.danielalonso.dev` (y el
+   `*.azurestaticapps.net` de la SWA para probar antes del dominio).
+5. Variables del repo: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`,
+   `GOOGLE_CLIENT_ID`. Sin `AZURE_RESOURCE_GROUP` el workflow de despliegue no hace nada.
+6. Tras el primer push, GHCR crea el paquete `mea-culpa-api` como **privado**: hazlo público (Package settings →
+   Change visibility) y relanza el workflow; el propio workflow lo comprueba y avisa.
+7. En Cloudflare, CNAME `meaculpa` → `defaultHostname` de la SWA en modo **DNS only**. Después, variable
+   `BIND_CUSTOM_DOMAIN=true` y relanzar: el Bicep asocia el dominio (si el CNAME no existe aún, esa validación falla).
+
+Si se borra y se recrea el grupo con el mismo nombre, el recurso de Foundry anterior queda en *soft-delete* con el
+mismo nombre: antes, `az cognitiveservices account purge -g rg-mea-culpa -n meaculpa-ai-<sufijo> -l francecentral`.
+
+Despliegue manual equivalente:
 
 ```bash
-# Cuando decidas pagar (NO se ha ejecutado):
-az group create -n rg-mea-culpa -l swedencentral
+export API_IMAGE=ghcr.io/darkwerty/mea-culpa-api:<sha> GOOGLE_CLIENT_ID=<id>.apps.googleusercontent.com
 az deployment group create -g rg-mea-culpa -f infra/main.bicep -p infra/main.bicepparam
 ```
 
@@ -203,7 +274,8 @@ en la calculadora de Azure antes de desplegar:
 | Foundry: tokens (≈0,0005 $ por diagnóstico, ≈0,005 $ por partida contra el LLM) | < 1 € con 100 partidas |
 | **Total** | **~0–2 €/mes** |
 
-Ojo: el presupuesto **avisa, no corta**. El tope real lo ponen los 10K TPM del deployment y el escalado máximo a 2 réplicas.
+Ojo: el presupuesto **avisa, no corta**. Los topes reales son las cuotas por usuario, el fusible global de llamadas
+al LLM, los 10K TPM del deployment y el escalado máximo a 1 réplica. (El Storage account añade céntimos al mes.)
 
 ## Decisiones de diseño
 
@@ -228,15 +300,18 @@ Ojo: el presupuesto **avisa, no corta**. El tope real lo ponen los 10K TPM del d
 
 ## Qué falta
 
-- **No se ha probado contra Azure real**: ni el modelo de Foundry, ni el despliegue Bicep, ni la imagen Docker. Las
-  cifras de calidad del LLM están por medir.
+- **No se ha probado contra Azure real**: ni el modelo de Foundry, ni el despliegue Bicep, ni Blob Storage, ni el
+  login con un cliente OAuth real (los tests usan tokens firmados con una clave de prueba). La imagen Docker sí se
+  construye y arranca en local. Las cifras de calidad del LLM están por medir.
 - Stockfish no estaba instalado en el equipo de desarrollo: el rival y el analizador con Stockfish están escritos pero sin probar.
 - El análisis con el motor propio puede tardar ~30 s en partidas largas; se podría paralelizar por posiciones o pasar a Stockfish.
-- Persistencia en ficheros JSON y para un único usuario; en Container Apps el disco es efímero (habría que usar
-  Table Storage o Cosmos DB) y no hay autenticación.
+- Las métricas de jugadas ilegales del LLM (`llm_moves.jsonl`) siguen en disco local: en Container Apps se pierden
+  al escalar a cero. No contienen datos de usuarios.
+- El límite de un análisis simultáneo es por réplica, no global.
 - Las etiquetas de patrones son heurísticas sencillas (no detectan clavadas, horquillas, debilidades de peones…).
 - El frontend no tiene arrastrar y soltar ni reloj; la promoción se elige con un selector simple.
-- La CI (`.github/workflows/ci.yml`: ruff + pytest) está escrita pero el repo no tiene remoto, así que nunca se ha ejecutado en GitHub.
+- La CI y el despliegue (`.github/workflows/`) están escritos pero el repo aún no tiene remoto, así que nunca se han
+  ejecutado en GitHub.
 
 ## Estructura
 
@@ -248,12 +323,16 @@ backend/meaculpa/
   analysis.py     análisis mea culpa: evaluaciones, caídas, etiquetas, diagnóstico y validación
   prompts.py      prompts y saneado de datos no fiables
   schemas.py      esquemas pydantic de la salida del LLM
-  games.py        partidas y persistencia
+  games.py        partidas por usuario
+  auth.py         verificación del ID token de Google
+  quota.py        cuotas diarias y fusible del LLM
+  storage.py      almacén Blob / ficheros con ETag
   main.py         API FastAPI
+backend/dev_server.py  servidor local sin login (no entra en la imagen)
 backend/tests/    pytest
 backend/scripts/evaluate.py
 data/pgn/         partidas de muestra
-web/              Nuxt 4 + Vue 3
+web/              Nuxt 4 + Vue 3 (+ scripts/swa-config.mjs: cabeceras y CSP de la SWA)
 infra/            Bicep
 eval/             resultados de la evaluación
 ```

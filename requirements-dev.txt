@@ -2,3 +2,4 @@
 pytest>=8
 httpx>=0.27
 ruff>=0.6
+cryptography>=43  # firma tokens de prueba en test_auth.py

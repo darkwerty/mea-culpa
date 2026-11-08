@@ -6,8 +6,10 @@ export default defineNuxtConfig({
   css: ['~/assets/main.css'],
   runtimeConfig: {
     public: {
-      // Sobrescribible con NUXT_PUBLIC_API_BASE
+      // Sobrescribible con NUXT_PUBLIC_API_BASE (en el despliegue, la URL de Container Apps)
       apiBase: 'http://127.0.0.1:8000',
+      // NUXT_PUBLIC_GOOGLE_CLIENT_ID. Vacío = modo local sin login (solo con backend/dev_server.py)
+      googleClientId: '',
     },
   },
   app: {

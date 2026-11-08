@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import io
+import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
@@ -226,12 +227,18 @@ class GameAnalysis:
         return d
 
 
+class AnalysisTimeout(Exception):
+    """El análisis superó su tiempo máximo."""
+
+
 def analyze_moves(
     moves: list[chess.Move],
     user_color: chess.Color,
     analyzer: Analyzer,
     start_fen: str = chess.STARTING_FEN,
+    deadline: float | None = None,
 ) -> GameAnalysis:
+    """`deadline` (time.monotonic) corta el análisis entre posiciones si se pasa de tiempo."""
     board = chess.Board(start_fen)
     positions: list[chess.Board] = [board.copy()]
     pairs: list[tuple[chess.Board, chess.Move]] = []
@@ -242,6 +249,8 @@ def analyze_moves(
 
     evals: list[PositionEval] = []
     for pos in positions:
+        if deadline is not None and time.monotonic() > deadline:
+            raise AnalysisTimeout()
         if pos.is_checkmate():
             evals.append(PositionEval(-MATE, None))
         elif pos.is_game_over():
@@ -329,7 +338,7 @@ def analyze_moves(
 
 
 def parse_pgn(pgn_text: str) -> chess.pgn.Game:
-    if len(pgn_text) > 50_000:
+    if len(pgn_text) > 20_000:
         raise ValueError("PGN demasiado largo")
     game = chess.pgn.read_game(io.StringIO(pgn_text))
     if game is None:
@@ -339,9 +348,25 @@ def parse_pgn(pgn_text: str) -> chess.pgn.Game:
     return game
 
 
+VALID_RESULTS = {"1-0", "0-1", "1/2-1/2", "*"}
+
+
 def pgn_without_comments(game: chess.pgn.Game) -> str:
+    """Reconstruye el PGN solo con la línea principal: sin comentarios, sin variantes y sin cabeceras de
+    texto libre (Event, White, Annotator...), que son una vía de inyección de prompt. Se conservan solo
+    FEN/SetUp (validados al crear el tablero) y Result (de una lista cerrada)."""
+    clean = chess.pgn.Game()
+    clean.headers.clear()
+    board = game.board()
+    if board.fen() != chess.STARTING_FEN:
+        clean.setup(board)
+    result = game.headers.get("Result", "*")
+    clean.headers["Result"] = result if result in VALID_RESULTS else "*"
+    node: chess.pgn.GameNode = clean
+    for move in game.mainline_moves():
+        node = node.add_variation(move)
     exporter = chess.pgn.StringExporter(headers=True, variations=False, comments=False)
-    return game.accept(exporter)
+    return clean.accept(exporter)
 
 
 # -------------------------------------------------------------- diagnóstico

@@ -4,3 +4,6 @@ chess>=1.11
 pydantic>=2.8
 openai>=3.40  # trae httpx2, que usan los tests del proveedor Azure
 azure-identity>=1.19
+azure-storage-blob>=12.25  # partidas y cuotas en Blob con identidad administrada
+google-auth>=2.40  # verificación del ID token de Google Identity Services
+requests>=2.32  # transporte de google-auth para descargar las claves públicas de Google

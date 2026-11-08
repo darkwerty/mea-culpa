@@ -1,0 +1,132 @@
+name: Deploy
+
+# Despliega la demo pública: imagen de la API en GHCR -> Bicep (Container Apps, Foundry, Blob...) -> frontend en
+# Static Web Apps. Sin secretos de larga duración: Azure se autentica por OIDC (credencial federada).
+#
+# Variables del repositorio (Settings > Secrets and variables > Actions > Variables), ninguna es secreta:
+#   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID  app registration con credencial federada
+#                                                           repo:<owner>/mea-culpa:ref:refs/heads/main
+#   AZURE_RESOURCE_GROUP                                    p. ej. rg-mea-culpa (creado en francecentral)
+#   GOOGLE_CLIENT_ID                                        <id>.apps.googleusercontent.com
+#   BIND_CUSTOM_DOMAIN                                      'true' cuando el CNAME meaculpa ya apunte a la SWA
+# Mientras no exista AZURE_RESOURCE_GROUP el workflow no hace nada.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  image:
+    if: vars.AZURE_RESOURCE_GROUP != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.name.outputs.image }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: name
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "image=ghcr.io/${owner}/mea-culpa-api:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.name.outputs.image }}
+      - name: la imagen debe poder descargarse sin credenciales (Container Apps no tiene registro configurado)
+        run: |
+          docker logout ghcr.io
+          if ! docker manifest inspect "${{ steps.name.outputs.image }}" > /dev/null; then
+            echo "::error::El paquete mea-culpa-api de GHCR es privado. Hazlo público (Package settings > Change visibility > Public) y relanza el workflow."
+            exit 1
+          fi
+
+  infra:
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      apiUrl: ${{ steps.deploy.outputs.apiUrl }}
+      webName: ${{ steps.deploy.outputs.webName }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - id: deploy
+        env:
+          API_IMAGE: ${{ needs.image.outputs.image }}
+          GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
+          BIND_CUSTOM_DOMAIN: ${{ vars.BIND_CUSTOM_DOMAIN || 'false' }}
+          RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+        run: |
+          test -n "$GOOGLE_CLIENT_ID" || { echo "::error::Falta la variable GOOGLE_CLIENT_ID"; exit 1; }
+          outputs=$(az deployment group create \
+            --name "meaculpa-${GITHUB_RUN_NUMBER}" \
+            --resource-group "$RG" \
+            --template-file infra/main.bicep \
+            --parameters infra/main.bicepparam \
+            --query properties.outputs -o json)
+          echo "apiUrl=$(jq -r .apiUrl.value <<< "$outputs")" >> "$GITHUB_OUTPUT"
+          echo "webName=$(jq -r .webName.value <<< "$outputs")" >> "$GITHUB_OUTPUT"
+          echo "API: $(jq -r .apiUrl.value <<< "$outputs") · SWA: $(jq -r .webDefaultHostname.value <<< "$outputs")"
+      - name: comprobación de humo
+        run: curl -fsS --retry 10 --retry-all-errors --retry-delay 15 "${{ steps.deploy.outputs.apiUrl }}/api/health"
+
+  web:
+    needs: infra
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: nuxt generate (+ staticwebapp.config.json con CSP)
+        working-directory: web
+        env:
+          NUXT_PUBLIC_API_BASE: ${{ needs.infra.outputs.apiUrl }}
+          NUXT_PUBLIC_GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
+          REQUIRE_DEPLOY_CONFIG: "1"
+        run: npm ci && npm run generate
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - id: swa
+        run: |
+          token=$(az staticwebapp secrets list -n "${{ needs.infra.outputs.webName }}" -g "${{ vars.AZURE_RESOURCE_GROUP }}" --query properties.apiKey -o tsv)
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+      - uses: Azure/static-web-apps-deploy@1a947af9992250f3bc2e68ad0754c0b0c11566c9 # v1
+        with:
+          azure_static_web_apps_api_token: ${{ steps.swa.outputs.token }}
+          action: upload
+          app_location: web/.output/public
+          skip_app_build: true
+          skip_api_build: true

@@ -20,11 +20,19 @@ export interface GameState {
 
 export function useApi() {
   const base = useRuntimeConfig().public.apiBase as string
-  const call = <T>(path: string, opts: Record<string, any> = {}) =>
-    $fetch<T>(path, { baseURL: base, ...opts }).catch((err: any) => {
+  const { session, signOut } = useAuth()
+
+  const call = <T>(path: string, opts: Record<string, any> = {}) => {
+    const headers: Record<string, string> = { ...(opts.headers ?? {}) }
+    if (session.value) headers.Authorization = `Bearer ${session.value.token}`
+    return $fetch<T>(path, { baseURL: base, ...opts, headers }).catch((err: any) => {
+      if (err?.status === 401 || err?.statusCode === 401) {
+        signOut('Tu sesión ha caducado: vuelve a entrar con Google.')
+      }
       const detail = err?.data?.detail
       throw new Error(typeof detail === 'string' ? detail : err?.message || 'Error de red')
     })
+  }
 
   return {
     health: () => call<any>('/api/health'),
