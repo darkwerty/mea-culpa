@@ -16,8 +16,13 @@ Flujo de una ronda (el servidor guarda la solución, o solo el pano_id, y la rev
 1. GET  /partidas/actual             la partida en curso del usuario, para retomarla al recargar en la misma ronda.
 2. GET  /partidas/{id}/foto/{n}      con fotos: imagen de la ronda n (solo la actual o anteriores; sin id de foto).
 3. POST /partidas/{id}/rondas/{n}    marca del jugador. Se guarda primero (con etag: no se puede responder
-   dos veces ni repetir la ronda), luego la IA recibe solo las imágenes, y se devuelven distancias, puntos y
-   la solución.
+   dos veces ni repetir la ronda), y solo entonces se piden las capturas y la IA recibe las imágenes. Si algo
+   falla antes de llamar a la IA, la ronda se reabre y se devuelve lo descontado.
+
+Coste frente a Google: cada partida con Street View reserva al crearse sus capturas Static y su panorámica
+dinámica. Recargar la página con una partida a medias crea otra panorámica y otro mapa en el navegador: por eso
+las recargas tienen cuota por persona y día y gastan del tope de panorámicas; sin cupo, la partida se ve sin
+panorámica ni mapa hasta el día siguiente (o se abandona).
 """
 
 from __future__ import annotations
@@ -41,7 +46,7 @@ from ..partidas import geo_row
 from ..quota import UsageLimiter
 from ..ranking import RankingStore
 from ..storage import ObjectStore
-from .config import GEO_DESCRIPTIONS, SV_STATIC_HARD_CAP, VISION_MODEL_IDS, GeoSettings, get_geo_settings
+from .config import GEO_DESCRIPTIONS, VISION_MODEL_IDS, GeoSettings, get_geo_settings
 from .photos import PhotoSet
 from .schemas import GuessIn
 from .scoring import haversine_km, score
@@ -53,13 +58,35 @@ log = logging.getLogger("meaculpa.geo")
 
 GEO_PREFIX = "/api/geo"
 MAX_ATTEMPTS = 2  # un reintento si la salida no cumple el esquema
-PENDING_TIMEOUT_S = 180  # una ronda con la IA «pensando» más de esto se cierra con cero puntos para la IA
-MAP_LOADS = {"streetview": 2, "fotos": 1}  # mapa y panorámica, o solo mapa
+# Una ronda con la IA «pensando» más de esto se cierra con cero puntos para la IA. Por encima del peor caso real:
+# MAX_ATTEMPTS x 120 s de tiempo máximo de Foundry x 2 (un reintento del SDK) = 480 s, más las capturas.
+PENDING_TIMEOUT_S = 600
+STALE_ERROR = "no ha podido responder"
+MAP_LOADS = {"streetview": 2, "fotos": 1}  # al recargar: mapa y panorámica, o solo mapa
+# Dos rondas o más a menos de 1 km en sitios al azar de todo el mundo no son creíbles sin mirar dónde está.
+SUSPICIOUS_KM = 1.0
+SUSPICIOUS_ROUNDS = 2
+FUERA_RANKING = (
+    "Esta partida no entra en el ranking: dos o más rondas a menos de 1 km no son creíbles en sitios al azar "
+    "de todo el mundo."
+)
 
 AVISO_SIN_CLAVE = "Street View no está disponible ahora mismo: esta partida usa fotos de Wikimedia Commons."
 AVISO_CUPO = "Cupo de Street View de hoy agotado: esta partida usa fotos de Wikimedia Commons. Mañana vuelve."
 AVISO_FALLO = "Google Street View no responde ahora mismo: esta partida usa fotos de Wikimedia Commons."
 SV_NO_RESPONDE = "Google Street View no responde ahora mismo. Prueba otra vez en unos segundos."
+SV_CUPO_RONDA = "Cupo de Street View de hoy agotado: esta ronda se podrá terminar mañana."
+BLOQUEO_RECARGAS = (
+    "Has recargado la página muchas veces hoy con esta partida a medias, y cada recarga es una carga de pago en "
+    "Google. Puedes seguirla mañana o abandonarla y empezar otra."
+)
+BLOQUEO_MAPAS = (
+    "El mapa del juego ha llegado a su límite de hoy en Google: esta partida a medias se puede seguir mañana."
+)
+BLOQUEO_PANORAMAS = (
+    "Cupo de Street View de hoy agotado: esta partida a medias se puede seguir mañana, o abandonarla y jugar "
+    "con fotos de Wikimedia Commons."
+)
 
 
 def aviso_persona(n: int) -> str:
@@ -107,6 +134,8 @@ def geo_quota_defaults(geo: GeoSettings) -> dict[str, int]:
         "geo_sv_partidas": geo.quota_sv_games_per_day,
         "geo_sv_global": geo.sv_games_per_day,
         "geo_mapas": geo.maps_loads_per_day,
+        "geo_panoramas": geo.sv_panoramas_per_day,
+        "geo_recargas": geo.quota_reloads_per_day,
     }
 
 
@@ -175,13 +204,19 @@ def create_geo_router(
     def _finish_if_done(user: User, game: GeoGame) -> None:
         if game.estado == "en_curso" and game.ronda_actual >= game.total and not _pending(game):
             game.estado = "terminada"
+            if game.fuente == "streetview":
+                near = sum(1 for r in game.rondas if float(r["jugador"]["distancia_km"]) < SUSPICIOUS_KM)
+                if near >= SUSPICIOUS_ROUNDS:
+                    game.fuera_ranking = FUERA_RANKING
             store.clear_current(user.owner, game.id)
 
     def _close_stale(user: User, game: GeoGame) -> GeoGame:
         """Si la IA se quedó colgada (la réplica se apagó a media ronda), la ronda se cierra con 0 para la IA."""
         if not _pending(game) or time.time() - float(game.rondas[-1].get("t", 0)) < PENDING_TIMEOUT_S:
             return game
-        game.rondas[-1].update(ia={"error": "no ha podido responder", "distancia_km": None, "puntos": 0}, coste_usd=0.0)
+        game.rondas[-1].update(
+            ia={"error": STALE_ERROR, "distancia_km": None, "puntos": 0}, coste_usd=0.0, caducada=True
+        )
         _finish_if_done(user, game)
         try:
             _save(game)
@@ -227,8 +262,12 @@ def create_geo_router(
             }
         return out
 
-    def _state(game: GeoGame, known: dict[int, tuple[float, float]] | None = None) -> dict[str, Any]:
-        """Lo que ve el navegador: de la ronda en curso, solo la URL de su foto o el pano_id de su panorámica."""
+    def _state(
+        game: GeoGame, known: dict[int, tuple[float, float]] | None = None, bloqueo: str | None = None
+    ) -> dict[str, Any]:
+        """Lo que ve el navegador: de la ronda en curso, solo la URL de su foto o el pano_id de su panorámica.
+
+        Con `bloqueo` (sin cupo de recargas o de panorámicas), ni pano_id ni foto: el navegador no carga nada."""
         total = game.total
         solutions = _solutions(game, known)
         rondas = []
@@ -249,7 +288,7 @@ def create_geo_router(
                 row["foto"] = f"{GEO_PREFIX}/partidas/{game.id}/foto/{i}"
             rondas.append(row)
         actual = game.ronda_actual
-        playing = game.estado == "en_curso" and actual < total and not _pending(game)
+        playing = game.estado == "en_curso" and actual < total and not _pending(game) and bloqueo is None
         current = None
         if playing and game.fuente == "streetview":
             u = game.ubicaciones[actual]
@@ -267,6 +306,8 @@ def create_geo_router(
             if playing and game.fuente == "fotos"
             else None,
             "ubicacion_actual": current,
+            "bloqueo": bloqueo,
+            "fuera_ranking": game.fuera_ranking,
             "rondas": rondas,
             "marcador": {
                 "jugador": sum(r["jugador"]["puntos"] for r in rondas),
@@ -355,10 +396,32 @@ def create_geo_router(
         finally:
             pool.ensure()
         if len(entries) < geo.rounds:
-            limiter.try_consume(user.owner, "geo_sv_partidas", -1)
-            limiter.release_sv_game()
+            _release_sv(user)
             return None, AVISO_FALLO
         return [{"pano": e["pano"], "pais": e["pais"], "heading": round(rng.uniform(0, 360), 1)} for e in entries], None
+
+    def _release_sv(user: User) -> None:
+        limiter.try_consume(user.owner, "geo_sv_partidas", -1)
+        limiter.release_sv_game()
+
+    def _reload(user: User, game: GeoGame) -> str | None:
+        """Una recarga de la página con la partida a medias: el navegador vuelve a crear el mapa y, con Street View,
+        la panorámica. Cuenta en la cuota de recargas de la persona y en el tope de panorámicas del día.
+        Devuelve el motivo del bloqueo, o None si se puede pintar."""
+        if game.estado != "en_curso":
+            return None
+        if not limiter.try_consume(user.owner, "geo_recargas"):
+            return BLOQUEO_RECARGAS
+        streetview = game.fuente == "streetview"
+        if streetview and not limiter.try_panoramas(1):
+            limiter.try_consume(user.owner, "geo_recargas", -1)
+            return BLOQUEO_PANORAMAS
+        if not limiter.try_reload_loads(MAP_LOADS.get(game.fuente, 1)):
+            limiter.try_consume(user.owner, "geo_recargas", -1)
+            if streetview:
+                limiter.release_panoramas(1)
+            return BLOQUEO_MAPAS
+        return None
 
     @router.post("/partidas")
     def new_game(req: NewGeoGame, user: User = Depends(current_user)) -> dict[str, Any]:
@@ -366,52 +429,93 @@ def create_geo_router(
         if model_id is None or model_id not in models or not _enabled(model_id):
             raise HTTPException(400, "Ese modelo no está disponible ahora mismo")
         # Partida a medias: se retoma en la misma ronda (recargar o volver a empezar no sirve para saltarse una).
-        current_id = store.current(user.owner)
+        current_id, pointer_etag = store.current_with_etag(user.owner)
         current = store.get(user.owner, current_id) if current_id else None
+        for _ in range(12 if current_id and current is None else 0):
+            time.sleep(0.25)  # otra petición la está creando ahora mismo: se espera a que se guarde
+            current = store.get(user.owner, current_id)
+            if current is not None:
+                break
         if current is not None and current.estado == "en_curso" and not req.abandonar:
-            return {**_state(_close_stale(user, current)), "reanudada": True}
+            return _resume(user, current)
         if len(photos) < geo.rounds and sv is None:
             raise HTTPException(503, "El juego no tiene fotos cargadas")
+        # Primero la cuota de la persona (sin cuota no se toca ningún contador global), luego el mapa.
+        limiter.consume(user.owner, "geo_partidas")
         if not limiter.try_map_loads(1):
+            limiter.refund(user.owner, "geo_partidas")
             raise HTTPException(503, "El mapa del juego ha llegado a su límite de hoy. Vuelve mañana.")
-        limiter.consume(user.owner, "geo_partidas")  # sin cuota, la partida a medias sigue como estaba
+        # El puntero a la partida en curso se cambia con escritura condicionada antes de reservar nada de Google:
+        # si otra petición ha empezado partida a la vez, gana ella y esta devuelve lo descontado y la enseña.
+        game_id = new_game_id()
+        claimed = store.claim_current(user.owner, game_id, pointer_etag)
+        if claimed is None:
+            limiter.refund(user.owner, "geo_partidas")
+            limiter.add_map_loads(-1)
+            return _winner(user)
+        ubicaciones: list[dict[str, Any]] | None = None
+        try:
+            ubicaciones, aviso = _streetview_rounds(user)
+            if ubicaciones is not None:
+                game = GeoGame(
+                    id=game_id,
+                    owner=user.owner,
+                    created=time.time(),
+                    modelo=model_id,
+                    fotos=[],
+                    fuente="streetview",
+                    ubicaciones=ubicaciones,
+                    reserva=limiter.sv_reserve(),
+                )
+            else:
+                if len(photos) < geo.rounds:
+                    raise HTTPException(503, "El juego no tiene fotos cargadas")
+                game = GeoGame(
+                    id=game_id,
+                    owner=user.owner,
+                    created=time.time(),
+                    modelo=model_id,
+                    fotos=photos.pick(geo.rounds, store.seen(user.owner)),
+                    fuente="fotos",
+                    aviso=aviso,
+                )
+            _save(game)
+        except Exception:
+            limiter.refund(user.owner, "geo_partidas")
+            limiter.add_map_loads(-1)
+            if ubicaciones is not None:
+                _release_sv(user)
+            store.restore_current(user.owner, current_id, claimed)  # la partida de antes sigue en curso
+            raise
         if current is not None and current.estado == "en_curso":
             current.estado = "abandonada"  # no cuenta para el ranking
-            _save(current)
-            store.clear_current(user.owner, current.id)
-        ubicaciones, aviso = _streetview_rounds(user)
-        if ubicaciones is not None:
-            limiter.add_map_loads(1)  # la panorámica cuenta aparte del mapa
-            game = GeoGame(
-                id=new_game_id(),
-                owner=user.owner,
-                created=time.time(),
-                modelo=model_id,
-                fotos=[],
-                fuente="streetview",
-                ubicaciones=ubicaciones,
-            )
-        else:
-            if len(photos) < geo.rounds:
-                raise HTTPException(503, "El juego no tiene fotos cargadas")
-            chosen = photos.pick(geo.rounds, store.seen(user.owner))
-            game = GeoGame(
-                id=new_game_id(),
-                owner=user.owner,
-                created=time.time(),
-                modelo=model_id,
-                fotos=chosen,
-                fuente="fotos",
-                aviso=aviso,
-            )
-        _save(game)
-        store.set_current(user.owner, game.id)
+            try:
+                _save(current)
+            except HTTPException:
+                log.warning("No se pudo marcar como abandonada la partida %s", current.id)
         if game.fuente == "fotos":
             store.mark_seen(user.owner, game.fotos)
         _record(user, "geo_partida", ref=game.id, modelo=model_id)
         if ranking is not None:
             ranking.set_preference(user, req.ranking)
         return _state(game)
+
+    def _winner(user: User) -> dict[str, Any]:
+        """La partida que ha empezado otra petición a la vez (puede tardar un momento en guardarse)."""
+        for _ in range(20):
+            winner_id = store.current(user.owner)
+            winner = store.get(user.owner, winner_id) if winner_id else None
+            if winner is not None and winner.estado == "en_curso":
+                return {**_state(winner), "reanudada": True}
+            time.sleep(0.25)
+        raise HTTPException(409, "Ya estás empezando otra partida; recarga la página")
+
+    def _resume(user: User, game: GeoGame) -> dict[str, Any]:
+        game = _close_stale(user, game)
+        if game.estado != "en_curso":
+            store.clear_current(user.owner, game.id)
+            return {**_state(game), "reanudada": True}
+        return {**_state(game, bloqueo=_reload(user, game)), "reanudada": True}
 
     @router.get("/partidas/actual")
     def current_game(user: User = Depends(current_user)) -> dict[str, Any]:
@@ -424,8 +528,7 @@ def create_geo_router(
         if game.estado != "en_curso":
             store.clear_current(user.owner, game.id)
             return {"partida": None}
-        limiter.add_map_loads(MAP_LOADS.get(game.fuente, 1))  # al recargar, el navegador vuelve a cargar el mapa
-        return {"partida": _state(game)}
+        return {"partida": _state(game, bloqueo=_reload(user, game))}
 
     @router.get("/partidas/{game_id}")
     def get_game(game_id: str, user: User = Depends(current_user)) -> dict[str, Any]:
@@ -442,27 +545,38 @@ def create_geo_router(
             headers={"Cache-Control": "private, max-age=3600"},
         )
 
-    def _round_target(game: GeoGame, n: int) -> tuple[float, float, bytes | list[bytes]]:
-        """Solución e imágenes de la ronda `n`. Con Street View: coordenadas y capturas pedidas ahora, en memoria."""
+    def _round_place(game: GeoGame, n: int) -> tuple[float, float]:
+        """Solución de la ronda `n`. Con Street View, de los metadatos (gratis), en el momento y sin guardarla."""
         if game.fuente != "streetview":
             photo = photos.get(game.fotos[n])
-            return photo.lat, photo.lon, photos.image_bytes(photo.id)
+            return photo.lat, photo.lon
         if sv is None:
             raise HTTPException(503, "Street View no está disponible ahora mismo. Prueba otra vez más tarde.")
-        u = game.ubicaciones[n]
         try:
-            lat, lon = sv.location(u["pano"])
+            return sv.location(game.ubicaciones[n]["pano"])
         except StreetViewError as exc:
             log.warning("Sin metadatos para la ronda %d de %s: %s", n, game.id, exc)
             raise HTTPException(503, SV_NO_RESPONDE) from None
-        if not limiter.try_sv_images(geo.sv_images):
-            raise HTTPException(503, "Cupo de Street View de hoy agotado: esta ronda se podrá terminar mañana.")
+
+    def _round_images(game: GeoGame, n: int) -> bytes | list[bytes]:
+        """Imágenes para la IA: la foto, o las capturas de Street View Static pedidas ahora, solo en memoria."""
+        if game.fuente != "streetview":
+            return photos.image_bytes(game.fotos[n])
+        u = game.ubicaciones[n]
         try:
-            images = fetch_images(sv, u["pano"], float(u.get("heading", 0)), geo)
+            return fetch_images(sv, u["pano"], float(u.get("heading", 0)), geo)
         except StreetViewError as exc:
             log.warning("Sin capturas para la ronda %d de %s: %s", n, game.id, exc)
             raise HTTPException(503, SV_NO_RESPONDE) from None
-        return lat, lon, images
+
+    def _reopen(game: GeoGame, n: int) -> None:
+        """Quita la respuesta de la ronda `n` (algo falló antes de llamar a la IA): se puede volver a responder."""
+        if len(game.rondas) == n + 1 and game.rondas[n].get("ia") is None:
+            game.rondas.pop()
+            try:
+                store.save(game)
+            except GeoConflictError:
+                log.warning("No se pudo reabrir la ronda %d de %s", n, game.id)
 
     @router.post("/partidas/{game_id}/rondas/{n}")
     def answer(game_id: str, n: int, guess: GuessIn, user: User = Depends(current_user)) -> dict[str, Any]:
@@ -473,16 +587,20 @@ def create_geo_router(
             raise HTTPException(409, "La IA todavía está respondiendo la ronda anterior")
         if n != game.ronda_actual:
             raise HTTPException(409, "Esa ronda ya se ha jugado o todavía no toca")
+        if store.current(user.owner) != game.id:
+            raise HTTPException(409, "Esta partida ya no es la que tienes en curso; recarga la página")
         provider = models.get(game.modelo)
         if provider is None or not _enabled(game.modelo):
             raise HTTPException(503, "El modelo de esta partida ya no está disponible")
-        # Cuota antes de nada: si no hay cuota, la ronda sigue abierta para cuando la haya.
-        budget.check_budget(user.owner)
-        limiter.consume_geo_llm(user.owner)
+        budget.check_budget(user.owner)  # solo mira: si no hay presupuesto, la ronda sigue abierta
 
-        lat, lon, images = _round_target(game, n)
+        lat, lon = _round_place(game, n)  # metadatos gratis: aún no se ha pagado nada
         d_user = haversine_km(guess.lat, guess.lon, lat, lon)
-        # 1) Se fija la respuesta del jugador (escritura condicionada): ya no se puede cambiar ni repetir.
+        # 1) Se fija la respuesta del jugador (escritura condicionada) antes de gastar nada: de varias respuestas a
+        #    la vez solo pasa una, y las demás reciben 409 sin pedir capturas ni llamar a la IA.
+        need = geo.sv_images if game.fuente == "streetview" else 0
+        extra = need if game.capturas + need > game.reserva else 0  # fuera de la reserva: reintento
+        game.capturas += need
         game.rondas.append(
             {
                 "jugador": {
@@ -497,7 +615,22 @@ def create_geo_router(
         )
         _save(game)
 
-        # 2) La IA recibe solo las imágenes (con Street View, capturas en memoria que se sueltan al acabar).
+        # 2) Cuota de IA y capturas. Si algo falla aquí, la ronda se reabre y se devuelve lo descontado.
+        llm_taken = False
+        try:
+            limiter.consume_geo_llm(user.owner)
+            llm_taken = True
+            if extra and not limiter.try_sv_images(extra):
+                game.capturas -= need  # no se ha pedido nada
+                raise HTTPException(503, SV_CUPO_RONDA)
+            images = _round_images(game, n)
+        except HTTPException:
+            if llm_taken:
+                limiter.release_geo_llm(user.owner)
+            _reopen(game, n)
+            raise
+
+        # 3) La IA recibe solo las imágenes (con Street View, capturas en memoria que se sueltan al acabar).
         ai, usd, metrics = _ask_model(provider, images)
         del images
         budget.add_cost(usd, user.owner)
@@ -517,7 +650,17 @@ def create_geo_router(
             usd=usd,
         )
         _finish_if_done(user, game)
-        _save(game)
+        try:
+            _save(game)
+        except HTTPException:
+            # Solo pasa si la ronda se cerró por caducada mientras la IA pensaba: se guarda la respuesta real.
+            fresh = store.get(user.owner, game.id)
+            if fresh is None or len(fresh.rondas) <= n or not fresh.rondas[n].get("caducada"):
+                raise
+            fresh.rondas[n] = game.rondas[n]
+            fresh.fuera_ranking = fresh.fuera_ranking or game.fuera_ranking
+            _save(fresh)
+            game = fresh
         if game.estado == "terminada":
             _rank(user, game)
         state = _state(game, known={n: (lat, lon)})
@@ -526,7 +669,7 @@ def create_geo_router(
 
     def _rank(user: User, game: GeoGame) -> None:
         """Partida terminada al ranking, con los puntos que ha calculado el servidor. Street View y fotos, aparte."""
-        if ranking is None:
+        if ranking is None or game.fuera_ranking:
             return
         you = sum(r["jugador"]["puntos"] for r in game.rondas)
         ai = sum((r.get("ia") or {}).get("puntos", 0) for r in game.rondas)
@@ -554,8 +697,9 @@ def create_geo_router(
             "google_hoy": limiter.google_today(),
             "google_limites": {
                 "sv_partidas": limiter.sv_games_limit(),
-                "sv_imagenes": min(geo.sv_static_per_day, SV_STATIC_HARD_CAP),
+                "sv_imagenes": limiter.sv_static_limit(),
                 "mapas": limiter.maps_limit(),
+                "panoramas": limiter.panoramas_limit(),
             },
         }
 

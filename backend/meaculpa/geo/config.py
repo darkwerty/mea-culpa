@@ -44,18 +44,33 @@ class GeoSettings:
     quota_sv_games_per_day: int = 3  # partidas con Street View por persona y día (UTC); /admin la cambia
     # Topes propios por debajo de los de Google (que son 300 al día y se reinician a medianoche de California):
     sv_static_per_day: int = 280  # capturas de Street View Static al día; nunca más de SV_STATIC_HARD_CAP
-    maps_loads_per_day: int = 240  # cargas de mapa y panorámica estimadas al día (Google corta en 300)
+    # Capturas que no se reservan para partidas nuevas: quedan para reintentar una ronda cuando Google falla.
+    sv_static_slack: int = 20
+    # Cargas de la Maps JavaScript API al día que cuentan en la cuota «Map loads» de Google: cada mapa y cada
+    # panorámica de Street View (comprobado en Cloud Monitoring: cada `new StreetViewPanorama` es un loadMap). La
+    # cuota en Google es de 160 al día (160 x 31 = 4.960, por debajo de las 5.000 panorámicas gratis al mes).
+    # Las partidas nuevas paran en `maps_loads_per_day`; las recargas pueden llegar hasta MAPS_HARD_CAP.
+    maps_loads_per_day: int = 140
+    # Panorámicas de Street View dinámico al día (su SKU: 5.000 gratis al mes, unas 161 al día). Cada partida con
+    # Street View crea una y cada recarga de la página, otra. Doble control por si Google dejara de contarlas arriba.
+    sv_panoramas_per_day: int = 150
+    quota_reloads_per_day: int = 10  # recargas de una partida a medias por persona y día (cada una, mapa y panorámica)
     # Para tests: sustituye a la petición HTTP a Google (url, params) -> (status, cuerpo, content-type).
     http_get: Callable[[str, dict], tuple[int, bytes, str]] | None = field(default=None, repr=False, compare=False)
 
     @property
     def sv_games_per_day(self) -> int:
         """Partidas con Street View al día (todas las personas) que caben en el tope de capturas."""
-        return max(0, min(self.sv_static_per_day, SV_STATIC_HARD_CAP) // max(1, self.rounds * self.sv_images))
+        usable = min(self.sv_static_per_day, SV_STATIC_HARD_CAP) - max(0, self.sv_static_slack)
+        return max(0, usable // max(1, self.rounds * self.sv_images))
 
 
 # Techo duro de capturas de Street View Static al día, por debajo de la cuota de 300 que hay puesta en Google.
 SV_STATIC_HARD_CAP = 290
+# Techo duro de panorámicas dinámicas al día: 155 x 31 = 4.805, por debajo de las 5.000 gratis al mes.
+SV_PANORAMAS_HARD_CAP = 155
+# Techo duro de cargas de mapa y panorámica al día, por debajo de la cuota de 160 «Map loads» puesta en Google.
+MAPS_HARD_CAP = 155
 
 
 def get_geo_settings() -> GeoSettings:
@@ -76,5 +91,8 @@ def get_geo_settings() -> GeoSettings:
         sv_pool_low=_int("GEO_SV_POOL_LOW", 20),
         quota_sv_games_per_day=_int("GEO_QUOTA_SV_GAMES_PER_DAY", 3),
         sv_static_per_day=min(SV_STATIC_HARD_CAP, _int("GEO_SV_STATIC_PER_DAY", 280)),
-        maps_loads_per_day=_int("GEO_MAPS_LOADS_PER_DAY", 240),
+        maps_loads_per_day=min(MAPS_HARD_CAP, _int("GEO_MAPS_LOADS_PER_DAY", 140)),
+        sv_static_slack=_int("GEO_SV_STATIC_SLACK", 20),
+        sv_panoramas_per_day=min(SV_PANORAMAS_HARD_CAP, _int("GEO_SV_PANORAMAS_PER_DAY", 150)),
+        quota_reloads_per_day=_int("GEO_QUOTA_RELOADS_PER_DAY", 10),
     )

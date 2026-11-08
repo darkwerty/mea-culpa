@@ -3,7 +3,9 @@
 import json
 import logging
 import random
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from geo_support import SV_KEY, FakeGoogle
@@ -223,7 +225,7 @@ def test_pending_round_hidden_then_closed_if_stale(sv_client, tmp_path):
     assert pending["pendiente"] is True and pending["rondas"] == [] and pending["ubicacion_actual"] is None
     assert _answer(c, pending, 1).status_code == 409  # mientras la IA piensa no se puede seguir
     g = store.get(owner, game["id"])
-    g.rondas[-1]["t"] = time.time() - 600  # la réplica se apagó a media ronda
+    g.rondas[-1]["t"] = time.time() - 700  # la réplica se apagó a media ronda
     store.save(g)
     closed = c.get("/api/geo/partidas/actual", headers=auth()).json()["partida"]
     assert closed["pendiente"] is False and closed["rondas"][0]["ia"]["puntos"] == 0
@@ -240,7 +242,7 @@ def test_without_key_games_use_photos(make_geo_client):
 
 
 def test_daily_streetview_cap_falls_back_to_photos(sv_client):
-    c = sv_client(sv_static_per_day=20)  # 5 rondas x 4 capturas: cabe una partida al día
+    c = sv_client(sv_static_per_day=40)  # 5 rondas x 4 capturas y 20 de holgura: cabe una partida al día
     first = _new(c, "ana")
     assert first["fuente"] == "streetview"
     second = _new(c, "luis")
@@ -257,7 +259,7 @@ def test_static_capture_cap_never_exceeded(sv_client):
     c = sv_client(sv_static_per_day=500)  # se recorta al techo duro, por debajo de los 300 de Google
     costes = c.get("/api/geo/costes", headers=auth()).json()
     assert costes["google_limites"]["sv_imagenes"] == 290
-    assert costes["google_limites"]["sv_partidas"] == 290 // 20
+    assert costes["google_limites"]["sv_partidas"] == (290 - 20) // 20
 
 
 def test_per_person_streetview_quota(sv_client):
@@ -291,18 +293,197 @@ def test_google_error_mid_round_keeps_round_open(sv_client):
 
 
 def test_maps_loads_cap(sv_client):
-    c = sv_client(maps_loads_per_day=3)
-    assert _new(c, "ana")["fuente"] == "streetview"  # mapa y panorámica: 2
-    assert _new(c, "luis")["fuente"] == "streetview"  # 3: cabe una carga más (y la panorámica se cuenta aparte)
-    r = c.post("/api/geo/partidas", json={}, headers=auth("eva"))
+    c = sv_client(maps_loads_per_day=5)
+    assert _new(c, "ana")["fuente"] == "streetview"  # mapa y panorámica: 2 cargas en la cuota de Google
+    assert _new(c, "luis")["fuente"] == "streetview"  # 4
+    third = _new(c, "eva")  # 5: cabe el mapa, pero no la panorámica
+    assert third["fuente"] == "fotos" and third["aviso"].startswith("Cupo de Street View de hoy agotado")
+    r = c.post("/api/geo/partidas", json={}, headers=auth("bea"))
     assert r.status_code == 503 and "mapa" in r.json()["detail"]
+    hoy = c.get("/api/geo/costes", headers=auth()).json()["google_hoy"]
+    assert hoy["mapas"] == 5 and hoy["panoramas"] == 2 and hoy["sv_partidas"] == 2
+    # Una recarga sí puede usar el margen hasta el techo: la partida empezada se puede seguir
+    state = c.get("/api/geo/partidas/actual", headers=auth("ana")).json()["partida"]
+    assert state["bloqueo"] is None and state["ubicacion_actual"]["pano"]
+
+
+def test_person_without_quota_does_not_spend_global_counters(sv_client):
+    c = sv_client(quota_games_per_day=1)
+    _new(c)
+    before = c.get("/api/geo/costes", headers=auth()).json()["google_hoy"]
+    for _ in range(10):
+        r = c.post("/api/geo/partidas", json={"abandonar": True}, headers=auth())
+        assert r.status_code == 429
+    assert c.get("/api/geo/costes", headers=auth()).json()["google_hoy"] == before
+    assert c.get("/api/geo/partidas/actual", headers=auth()).json()["partida"]["estado"] == "en_curso"
+
+
+def test_reloads_are_limited_per_person(sv_client):
+    c = sv_client(quota_reloads_per_day=3)
+    game = _new(c)
+    for _ in range(3):
+        state = c.get("/api/geo/partidas/actual", headers=auth()).json()["partida"]
+        assert state["ubicacion_actual"]["pano"] and state["bloqueo"] is None
+    hoy = c.get("/api/geo/costes", headers=auth()).json()["google_hoy"]
+    assert hoy["panoramas"] == 4 and hoy["mapas"] == 8  # la partida y tres recargas, mapa y panorámica cada una
+    for _ in range(50):  # ni GET /actual ni volver a «Empezar» dan más panorámicas ni cuentan más cargas
+        blocked = c.get("/api/geo/partidas/actual", headers=auth()).json()["partida"]
+        assert blocked["ubicacion_actual"] is None and "recargado" in blocked["bloqueo"]
+    again = _new(c)
+    assert again["reanudada"] is True and again["ubicacion_actual"] is None and again["bloqueo"]
+    assert c.get("/api/geo/costes", headers=auth()).json()["google_hoy"] == hoy
+    assert _new(c, "bea")["fuente"] == "streetview"  # a los demás no les afecta
+    # Se puede abandonar y empezar otra
+    fresh = _new(c, abandonar=True)
+    assert fresh["id"] != game["id"] and fresh["bloqueo"] is None
+
+
+def test_panorama_cap_blocks_reloads_and_new_streetview_games(sv_client):
+    c = sv_client(sv_panoramas_per_day=2)
+    _new(c, "ana")
+    _new(c, "bea")
+    third = _new(c, "eva")
+    assert third["fuente"] == "fotos" and third["aviso"].startswith("Cupo de Street View de hoy agotado")
+    hoy = c.get("/api/geo/costes", headers=auth()).json()["google_hoy"]
+    assert hoy["sv_partidas"] == 2 and hoy["sv_imagenes"] == 40  # la reserva de eva se ha devuelto
+    blocked = c.get("/api/geo/partidas/actual", headers=auth("ana")).json()["partida"]
+    assert blocked["ubicacion_actual"] is None and blocked["bloqueo"].startswith("Cupo de Street View")
+    photos = c.get("/api/geo/partidas/actual", headers=auth("eva")).json()["partida"]
+    assert photos["bloqueo"] is None and photos["foto_actual"]  # con fotos no hace falta panorámica
+
+
+class SlowGoogle(FakeGoogle):
+    def __call__(self, url, params):
+        if not url.endswith("/metadata"):
+            time.sleep(0.3)
+        return super().__call__(url, params)
+
+
+def test_simultaneous_answers_fetch_captures_once(sv_client):
+    c = sv_client(google=SlowGoogle())
+    game = _new(c)
+    with ThreadPoolExecutor(8) as ex:
+        codes = list(ex.map(lambda _: _answer(c, game, 0).status_code, range(8)))
+    assert codes.count(200) == 1 and codes.count(409) == 7
+    assert c.google.static == 4  # solo la respuesta que ha fijado la ronda pide capturas
+    assert c.get("/api/geo/costes", headers=auth()).json()["google_hoy"]["sv_imagenes"] == 20  # la reserva
+
+
+def test_simultaneous_new_games_leave_one_in_progress(sv_client):
+    c = sv_client(google=SlowGoogle(), sv_pool_target=40)  # que la reserva de pano_id dé para todas
+    with ThreadPoolExecutor(4) as ex:
+        games = list(ex.map(lambda _: c.post("/api/geo/partidas", json={}, headers=auth()), range(4)))
+    ids = {g.json()["id"] for g in games if g.status_code == 200}
+    assert len(ids) == 1
+    hoy = c.get("/api/geo/costes", headers=auth()).json()["google_hoy"]
+    assert hoy["sv_partidas"] == 1 and hoy["sv_imagenes"] == 20  # las perdedoras devuelven lo reservado
+    assert hoy["mapas"] == 2 * hoy["panoramas"] <= 8  # las demás cuentan como recargas de la misma partida
+    assert all(g.json()["id"] in ids for g in games)  # todas reciben la misma partida
+
+
+def test_only_current_game_accepts_answers(sv_client, tmp_path):
+    c = sv_client()
+    first = _new(c)
+    store = GeoStore(FileObjectStore(tmp_path / "store"))
+    owner = next(p.name for p in (tmp_path / "store" / "geo").iterdir() if p.is_dir() and p.name != "sv")
+    orphan = store.get(owner, first["id"])
+    orphan.id = "b" * 16
+    orphan.etag = None
+    store.save(orphan)  # una partida «en curso» que no es la del puntero
+    r = _answer(c, {"id": orphan.id}, 0)
+    assert r.status_code == 409 and "en curso" in r.json()["detail"]
+    assert _answer(c, first, 0).status_code == 200
+
+
+def test_failed_captures_reopen_round_and_refund_ai_quota(sv_client):
+    google = FakeGoogle()
+    c = sv_client(google=google, quota_llm_per_day=2)
+    game = _new(c)
+    google.fail = True
+    for _ in range(5):  # una caída de Google no gasta cuota de IA
+        assert _answer(c, game, 0).status_code == 503
+    google.fail = False
+    assert _answer(c, game, 0).status_code == 200
+    assert _answer(c, game, 1).status_code == 200
+
+
+class FlakyGoogle(FakeGoogle):
+    """Con `flaky`, una de cada cuatro capturas falla (las otras tres se habrían cobrado)."""
+
+    def __init__(self):
+        super().__init__()
+        self.flaky = False
+        self.n = 0
+        self.lock = threading.Lock()
+
+    def __call__(self, url, params):
+        if self.flaky and not url.endswith("/metadata"):
+            with self.lock:
+                self.n += 1
+                fail = self.n % 4 == 0
+            if fail:
+                raise ConnectionError("una captura falla")
+        return super().__call__(url, params)
+
+
+def test_retries_beyond_reserve_use_the_slack_only(sv_client):
+    google = FlakyGoogle()
+    c = sv_client(google=google, sv_static_per_day=44, sv_static_slack=24)  # 1 partida (20) y 24 de holgura
+    game = _new(c)
+    google.flaky = True
+    rs = [_answer(c, game, 0) for _ in range(14)]
+    # 5 intentos caben en la reserva de la partida y 6 más en la holgura; luego, a esperar a mañana
+    assert [r.status_code for r in rs] == [503] * 14
+    assert "Cupo de Street View" in rs[-1].json()["detail"] and "no responde" in rs[0].json()["detail"]
+    hoy = c.get("/api/geo/costes", headers=auth()).json()["google_hoy"]
+    assert hoy["sv_imagenes"] == 44  # nunca pasa del tope
+    assert c.get("/api/geo/partidas/actual", headers=auth()).json()["partida"]["ronda_actual"] == 0
+
+
+def test_slow_ai_is_not_closed_as_stale(sv_client, monkeypatch):
+    import meaculpa.geo.router as router_mod
+
+    class SlowSpy(SpyProvider):
+        def locate(self, *a, **k):
+            time.sleep(1.0)
+            return super().locate(*a, **k)
+
+    assert router_mod.PENDING_TIMEOUT_S >= 2 * 120 * 2 + 60  # por encima del peor caso de Foundry
+    monkeypatch.setattr(router_mod, "PENDING_TIMEOUT_S", 0.3)  # simula una IA más lenta que el plazo
+    c = sv_client(spy=SlowSpy())
+    game = _new(c)
+    out = {}
+    t = threading.Thread(target=lambda: out.update(r=_answer(c, game, 0)))
+    t.start()
+    time.sleep(0.6)
+    c.get(f"/api/geo/partidas/{game['id']}", headers=auth())  # el sondeo la cierra por caducada
+    t.join()
+    assert out["r"].status_code == 200  # la respuesta real de la IA no se pierde
+    state = c.get(f"/api/geo/partidas/{game['id']}", headers=auth()).json()
+    assert state["rondas"][0]["ia"].get("error") is None and state["rondas"][0]["ia"]["lat"] == 0
+
+
+def test_implausible_streetview_game_stays_out_of_ranking(sv_client):
+    c = sv_client()
+    game = _new(c)
+    last = None
+    for n in range(5):
+        pano = (last or game)["ubicacion_actual"]["pano"]
+        lat, lon = c.google.panos[pano]
+        last = _answer(c, game, n, lat=lat, lon=lon).json()  # justo en el sitio: mirando dónde está
+    assert last["estado"] == "terminada" and "no entra en el ranking" in last["fuera_ranking"]
+    honest = _new(c, "bea")
+    for n in range(5):
+        last = _answer(c, honest, n, "bea").json()
+    assert last["estado"] == "terminada" and last["fuera_ranking"] is None
 
 
 def test_admin_quota_overrides_are_known(sv_client):
     from meaculpa.geo.router import geo_quota_defaults
 
     defaults = geo_quota_defaults(GeoSettings(photos_dir=".", quota_sv_games_per_day=3))
-    assert defaults["geo_sv_partidas"] == 3 and defaults["geo_sv_global"] == 14 and defaults["geo_mapas"] == 240
+    assert defaults["geo_sv_partidas"] == 3 and defaults["geo_sv_global"] == 13 and defaults["geo_mapas"] == 140
+    assert defaults["geo_panoramas"] == 150 and defaults["geo_recargas"] == 10
 
 
 # ------------------------------------------------------------------ la clave del servidor no sale

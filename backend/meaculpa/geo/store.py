@@ -22,13 +22,14 @@ from fastapi import HTTPException
 from ..config import Settings
 from ..quota import UsageLimiter
 from ..storage import ObjectStore
-from .config import SV_STATIC_HARD_CAP, GeoSettings
+from .config import MAPS_HARD_CAP, SV_PANORAMAS_HARD_CAP, SV_STATIC_HARD_CAP, GeoSettings
 from .streetview import pacific_day
 
 GEO_KIND_LABELS = {
     "geo_partidas": "partidas de ¿Dónde está?",
     "geo_ia": "rondas analizadas por la IA",
     "geo_sv_partidas": "partidas con Street View",
+    "geo_recargas": "recargas de una partida a medias",
 }
 FUENTES = ("streetview", "fotos")
 MAX_SEEN = 400
@@ -56,6 +57,11 @@ class GeoGame:
     # pano_id es de Google (se puede guardar); las coordenadas no se guardan nunca.
     ubicaciones: list[dict[str, Any]] = field(default_factory=list)
     aviso: str | None = None  # por qué una partida va con fotos cuando se quería Street View
+    # Capturas de Street View Static: las reservadas al crear la partida (rondas x capturas, ya contadas en el tope
+    # del día) y las pedidas hasta ahora. Pasada la reserva (reintentos tras un fallo), cada captura se cuenta aparte.
+    reserva: int = 0
+    capturas: int = 0
+    fuera_ranking: str | None = None  # por qué una partida terminada no entra en el ranking
     etag: str | None = field(default=None, repr=False, compare=False)
 
     @property
@@ -102,11 +108,31 @@ class GeoStore:
         game.etag = etag
 
     def current(self, owner: str) -> str | None:
+        return self.current_with_etag(owner)[0]
+
+    def current_with_etag(self, owner: str) -> tuple[str | None, str | None]:
         found = self.objects.read(f"geo/{owner}/actual")
-        return found[0].decode() or None if found else None
+        return (found[0].decode() or None, found[1]) if found else (None, None)
+
+    def claim_current(self, owner: str, game_id: str, etag: str | None) -> str | None:
+        """Apunta a una partida nueva solo si el puntero sigue como se leyó (`etag`; None = que no exista).
+
+        Devuelve el etag nuevo, o None si otra petición se ha adelantado: dos peticiones a la vez para empezar
+        partida no pueden dejar dos partidas en curso."""
+        return self.objects.write(f"geo/{owner}/actual", game_id.encode(), etag=etag)
+
+    def restore_current(self, owner: str, previous: str | None, etag: str) -> None:
+        """Deshace `claim_current` (la partida nueva no se ha podido crear), si nadie ha tocado el puntero."""
+        key = f"geo/{owner}/actual"
+        if previous:
+            self.objects.write(key, previous.encode(), etag=etag)
+        else:
+            found = self.objects.read(key)
+            if found and found[1] == etag:
+                self.objects.delete(key)
 
     def set_current(self, owner: str, game_id: str) -> None:
-        """Apunta a la partida en curso. La última partida empezada manda."""
+        """Apunta a la partida en curso sin condiciones (tests)."""
         key = f"geo/{owner}/actual"
         for _ in range(5):
             found = self.objects.read(key)
@@ -143,6 +169,7 @@ class GeoLimiter(UsageLimiter):
             "geo_partidas": geo.quota_games_per_day,
             "geo_ia": geo.quota_llm_per_day,
             "geo_sv_partidas": geo.quota_sv_games_per_day,
+            "geo_recargas": geo.quota_reloads_per_day,
         }
         self.geo_global_limit = geo.global_llm_per_day
         self.geo = geo
@@ -155,11 +182,25 @@ class GeoLimiter(UsageLimiter):
             )
 
     def consume_geo_llm(self, owner: str) -> None:
-        """Una llamada a la IA: cuota del usuario, fusible del juego y fusible global de la demo."""
+        """Una llamada a la IA: cuota del usuario, fusible del juego y fusible global de la demo.
+
+        Si un fusible corta, se devuelve lo ya descontado: la ronda se reabre y no cuesta nada."""
         self.consume(owner, "geo_ia")
         if not self._increment(f"usage/{self._day()}/global", "geo_llm_calls", 1, self.geo_limit()):
+            self.refund(owner, "geo_ia")
             raise HTTPException(503, "El juego ha agotado su presupuesto diario de IA. Vuelve mañana.")
-        self.consume_llm_calls(1)
+        try:
+            self.consume_llm_calls(1)
+        except HTTPException:
+            self._increment(f"usage/{self._day()}/global", "geo_llm_calls", -1, 10**9)
+            self.refund(owner, "geo_ia")
+            raise
+
+    def release_geo_llm(self, owner: str) -> None:
+        """Devuelve una llamada a la IA que al final no se ha hecho (por ejemplo, Google no dio las capturas)."""
+        self.refund(owner, "geo_ia")
+        self._increment(f"usage/{self._day()}/global", "geo_llm_calls", -1, 10**9)
+        self._increment(f"usage/{self._day()}/global", "llm_calls", -1, 10**9)
 
     def try_consume(self, owner: str, kind: str, amount: int = 1) -> bool:
         """Como `consume`, pero devuelve False en vez de lanzar 429 (cuota de Street View: se juega con fotos)."""
@@ -177,32 +218,82 @@ class GeoLimiter(UsageLimiter):
     def maps_limit(self) -> int:
         default = self.geo.maps_loads_per_day
         value = self.overrides("geo_mapas", default) if self.overrides else default
-        return min(value, 290)  # Google corta en 300
+        return min(value, MAPS_HARD_CAP)  # lo que falta hasta el techo queda para recargas
+
+    def panoramas_limit(self) -> int:
+        default = self.geo.sv_panoramas_per_day
+        value = self.overrides("geo_panoramas", default) if self.overrides else default
+        return min(value, SV_PANORAMAS_HARD_CAP)
+
+    def sv_static_limit(self) -> int:
+        return min(self.geo.sv_static_per_day, SV_STATIC_HARD_CAP)
+
+    def sv_reserve(self) -> int:
+        """Capturas que reserva cada partida con Street View: todas las de sus rondas."""
+        return self.geo.rounds * self.geo.sv_images
 
     def try_sv_game(self) -> bool:
-        """Una partida con Street View más hoy, si cabe (reserva las capturas de sus rondas)."""
-        return self._increment(self._google_key(), "sv_partidas", 1, self.sv_games_limit())
+        """Una partida con Street View más hoy, si cabe: reserva las capturas de todas sus rondas y su panorámica
+        (que cuenta en su SKU y en la cuota de cargas de mapa).
+
+        Las reservas de partidas nuevas solo llegan hasta el tope menos la holgura (`sv_static_slack`), que queda
+        para reintentos; así una partida empezada no se queda a medias por el cupo de capturas."""
+        key, reserve = self._google_key(), self.sv_reserve()
+        if not self._increment(key, "sv_partidas", 1, self.sv_games_limit()):
+            return False
+        if not self._increment(key, "sv_imagenes", reserve, max(0, self.sv_static_limit() - self.geo.sv_static_slack)):
+            self._increment(key, "sv_partidas", -1, 10**9)
+            return False
+        if not self.try_panoramas(1):
+            self._increment(key, "sv_imagenes", -reserve, 10**9)
+            self._increment(key, "sv_partidas", -1, 10**9)
+            return False
+        if not self.try_map_loads(1):
+            self._increment(key, "panoramas", -1, 10**9)
+            self._increment(key, "sv_imagenes", -reserve, 10**9)
+            self._increment(key, "sv_partidas", -1, 10**9)
+            return False
+        return True
 
     def release_sv_game(self) -> None:
-        """Devuelve la partida reservada si al final no se ha podido jugar con Street View."""
-        self._increment(self._google_key(), "sv_partidas", -1, 10**9)
+        """Devuelve la partida reservada (capturas y panorámica) si al final no se ha podido jugar con Street View."""
+        key = self._google_key()
+        self._increment(key, "sv_partidas", -1, 10**9)
+        self._increment(key, "sv_imagenes", -self.sv_reserve(), 10**9)
+        self._increment(key, "panoramas", -1, 10**9)
+        self._increment(key, "mapas", -1, 10**9)
+
+    def try_panoramas(self, n: int) -> bool:
+        """Panorámicas de Street View dinámico: cada `new StreetViewPanorama` del navegador se cobra aparte."""
+        return self._increment(self._google_key(), "panoramas", n, self.panoramas_limit())
+
+    def release_panoramas(self, n: int) -> None:
+        self._increment(self._google_key(), "panoramas", -n, 10**9)
 
     def try_sv_images(self, n: int) -> bool:
-        """Capturas de Street View Static que se van a pedir ahora. Techo duro por debajo de la cuota de Google."""
-        limit = min(self.geo.sv_static_per_day, SV_STATIC_HARD_CAP)
-        return self._increment(self._google_key(), "sv_imagenes", n, limit)
+        """Capturas fuera de la reserva de su partida (reintentos). Techo duro por debajo de la cuota de Google."""
+        return self._increment(self._google_key(), "sv_imagenes", n, self.sv_static_limit())
+
+    def release_sv_images(self, n: int) -> None:
+        self._increment(self._google_key(), "sv_imagenes", -n, 10**9)
 
     def try_map_loads(self, n: int) -> bool:
+        """Cargas para una partida nueva: paran en el límite del día (/admin «geo_mapas»)."""
         return self._increment(self._google_key(), "mapas", n, self.maps_limit())
 
+    def try_reload_loads(self, n: int) -> bool:
+        """Cargas de una recarga de la página: pueden usar el margen hasta el techo, para que una partida empezada
+        se pueda retomar aunque ya no quepan partidas nuevas."""
+        return self._increment(self._google_key(), "mapas", n, MAPS_HARD_CAP)
+
     def add_map_loads(self, n: int) -> None:
-        """Al retomar una partida (recarga): cuenta sin cortar, para que la estimación se parezca a la de Google."""
+        """Cuenta sin cortar o, con `n` negativo, devuelve una carga no usada."""
         self._increment(self._google_key(), "mapas", n, 10**9)
 
     def google_today(self) -> dict[str, int]:
         found = self.objects.read(self._google_key())
         counts = json.loads(found[0]) if found else {}
-        return {k: int(counts.get(k, 0)) for k in ("sv_partidas", "sv_imagenes", "mapas")}
+        return {k: int(counts.get(k, 0)) for k in ("sv_partidas", "sv_imagenes", "mapas", "panoramas")}
 
     def geo_limit(self) -> int:
         return self.overrides("geo_global", self.geo_global_limit) if self.overrides else self.geo_global_limit

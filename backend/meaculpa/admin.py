@@ -36,7 +36,9 @@ QUOTA_LABELS = {
     "geo_global": "Fotos: llamadas a la IA al día (todas las personas)",
     "geo_sv_partidas": "Dónde está: partidas con Street View por persona y día",
     "geo_sv_global": "Dónde está: partidas con Street View al día, todas las personas (tope de capturas)",
-    "geo_mapas": "Dónde está: cargas de mapa de Google al día (Google corta en 300)",
+    "geo_mapas": "Dónde está: cargas de mapa y panorámica de Google para partidas nuevas al día (Google corta en 160)",
+    "geo_panoramas": "Dónde está: panorámicas de Street View al día, todas las personas (gratis hasta unas 161)",
+    "geo_recargas": "Dónde está: recargas de una partida a medias por persona y día",
 }
 
 
