@@ -14,13 +14,13 @@ WORKDIR /app
 # Stockfish para el análisis "mea culpa" y para el rival Stockfish por nivel.
 # ODBC Driver 18 (repositorio de Microsoft para la versión de Debian de la imagen) para Azure SQL con pyodbc.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends stockfish curl gnupg ca-certificates \
+    && apt-get install -y --no-install-recommends stockfish curl ca-certificates \
     && . /etc/os-release \
-    && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg \
-    && curl -fsSL "https://packages.microsoft.com/config/debian/${VERSION_ID}/prod.list" -o /etc/apt/sources.list.d/mssql-release.list \
+    && curl -fsSL -o /tmp/ms.deb "https://packages.microsoft.com/config/debian/${VERSION_ID}/packages-microsoft-prod.deb" \
+    && dpkg -i /tmp/ms.deb && rm /tmp/ms.deb \
     && apt-get update \
     && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 unixodbc \
-    && apt-get purge -y curl gnupg && apt-get autoremove -y \
+    && apt-get purge -y curl && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/* \
     && test -x /usr/games/stockfish
 
