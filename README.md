@@ -101,8 +101,8 @@ del LLM siempre como texto (nunca `v-html`).
 - **Login con Google** (Google Identity Services, botón «Continuar con Google», flujo de ID token, sin client
   secret). El frontend manda el ID token en `Authorization: Bearer`; la API (`backend/meaculpa/auth.py`) lo verifica
   con `google.oauth2.id_token.verify_oauth2_token` (firma con las claves públicas de Google, cacheadas una hora,
-  `aud` = `GOOGLE_CLIENT_ID`, `iss`, `exp`) y comprueba además `email_verified == true`. Todas las rutas salvo
-  `/api/health` lo exigen. **Sin `GOOGLE_CLIENT_ID` la API no arranca** y no hay ningún modo sin login activable por
+  `aud` = `GOOGLE_CLIENT_ID`, `iss`, `exp`) y comprueba además `email_verified == true`. Todas las rutas (bajo
+  `/api/meaculpa`) salvo `health` y `models` lo exigen. **Sin `GOOGLE_CLIENT_ID` la API no arranca** y no hay ningún modo sin login activable por
   variable de entorno.
 - **Cada usuario solo ve lo suyo.** Las partidas se guardan en `games/{sha256(sub)}/{id}.json`: ni el correo ni el
   `sub` en claro llegan al almacenamiento ni a los logs. Una partida de otro usuario devuelve 404, y el «otra vez has
@@ -199,6 +199,12 @@ Las llamadas usan `chat.completions.parse(response_format=<modelo pydantic>)`.
 Los tests comprueban este cliente sin red: un transporte HTTP falso verifica la URL, la cabecera `Authorization: Bearer`,
 el `response_format` JSON Schema y el parseo. **No se ha probado contra un recurso real de Azure.**
 
+Selector de modelo del rival IA: `GET /api/meaculpa/models` devuelve el catálogo de `backend/meaculpa/models.py`
+(GPT-4.1 mini, GPT-6 Luna sin razonamiento y con razonamiento alto, GPT-6.1 Terra y Claude Haiku 5.5) con
+`disponible` por modelo, y `POST /api/meaculpa/games` acepta `opponent.model`. Solo se activan los ids de
+`LLM_MODELS` (separados por comas; `LLM_DEFAULT_MODEL` el que se usa si no se elige); Claude necesita además
+`ANTHROPIC_FOUNDRY_RESOURCE`.
+
 Otras variables: `GOOGLE_CLIENT_ID` (obligatoria), `CORS_ORIGINS`, `AZURE_STORAGE_ACCOUNT_URL` +
 `AZURE_STORAGE_CONTAINER`, `STOCKFISH_PATH`, `ANALYSIS_DEPTH` (3), `STOCKFISH_ANALYSIS_DEPTH` (14),
 `LLM_MAX_RETRIES` (3), `MEA_CULPA_DATA_DIR`, `QUOTA_GAMES_PER_DAY` (30), `QUOTA_MOVES_PER_DAY` (1500),
@@ -260,21 +266,28 @@ export STOCKFISH_PATH="C:/.../stockfish-windows-x86-64-universal.exe"   # o 'sto
 
 - **Azure Container Apps** (plan Consumption) para la API, `minReplicas: 0` → escala a cero; `maxReplicas: 1` como
   tope de coste (el estado está en Blob, así que se puede subir con `apiMaxReplicas`).
-- **Recurso de Microsoft Foundry** (`Microsoft.CognitiveServices/accounts`, kind `AIServices`) con `disableLocalAuth`
-  y un **deployment del modelo** (`gpt-4.1-mini`, GlobalStandard, 10K TPM; parametrizable).
+- **Recurso de Microsoft Foundry existente** (`foundryAccountName`, hoy `meaculpa-fc-7952`, creado para el experimento,
+  con `disableLocalAuth`): el Bicep no lo crea, solo le añade el **deployment del modelo** (`gpt-4.1-mini`,
+  GlobalStandard, 10K TPM; parametrizable). `gpt-6-luna` no tiene cuota en la suscripción (0 TPM).
+- **Azure Container Registry Basic** (sin usuario admin) para la imagen de la API: el repo es privado, así que GHCR
+  obligaría a dar credenciales a Container Apps. La app tira de la imagen con su identidad administrada (*AcrPull*).
 - **Storage account** (Standard_LRS, sin claves compartidas ni acceso público) con un contenedor para partidas y
   cuotas; los contadores diarios se borran solos a los 30 días.
 - **Identidad administrada** asignada por el usuario con *Cognitive Services OpenAI User* sobre Foundry y *Storage
   Blob Data Contributor* sobre la cuenta de almacenamiento.
 - **Log Analytics + Application Insights** (con tope diario de ingesta de 1 GB).
 - **Static Web Apps (Free)** para el frontend y, en un segundo despliegue, el dominio `meaculpa.danielalonso.dev`.
+- **Desde noviembre de 2026 la demo vive en https://danielalonso.dev/meaculpa** (repo de la web personal): la
+  Container App está enlazada como backend de la SWA `swa-danielalonso` (plan Standard, ~9 $/mes, requisito para
+  enlazar backends), que reenvía `danielalonso.dev/api/*` a la API; por eso todas las rutas cuelgan de
+  `/api/meaculpa`. La SWA de este repo solo redirige `meaculpa.danielalonso.dev` a la nueva URL.
 - **Presupuesto mensual** (desde 2026-11-01) con alertas al 50 % y 90 % (real) y al 100 % (previsto) a
   admin@example.com.
 
-La imagen (`Dockerfile`, dependencias fijadas con `constraints.txt`) se publica en GHCR; no hay Azure Container
-Registry para no sumar su coste fijo. `.github/workflows/ci.yml` (permisos de solo lectura, acciones fijadas por SHA)
+La imagen (`Dockerfile`, dependencias fijadas con `constraints.txt`) se construye en la nube con `az acr build` y se
+guarda en el ACR del grupo. `.github/workflows/ci.yml` (permisos de solo lectura, acciones fijadas por SHA)
 pasa ruff y pytest, construye la imagen y comprueba que no arranca sin `GOOGLE_CLIENT_ID`, y ejecuta `nuxt generate`.
-`.github/workflows/deploy.yml` despliega en cada push a `main`: imagen a GHCR → `az deployment group create` (login
+`.github/workflows/deploy.yml` despliega en cada push a `master`: `az acr build` → `az deployment group create` (login
 OIDC, sin secretos) → `nuxt generate` con la URL de la API → Static Web App.
 
 ### Primer despliegue (pasos manuales, una vez)
@@ -284,25 +297,29 @@ OIDC, sin secretos) → `nuxt generate` con la URL de la API → Static Web App.
    `Microsoft.OperationalInsights`, `Microsoft.Insights`, `Microsoft.ManagedIdentity`, `Microsoft.Storage` y
    `Microsoft.Web`.
 2. `az group create -n rg-mea-culpa -l francecentral`.
-3. App registration para GitHub con credencial federada `repo:darkwerty/mea-culpa:ref:refs/heads/main`, con rol
+3. App registration para GitHub con credencial federada `repo:darkwerty/mea-culpa:ref:refs/heads/master`, con rol
    *Contributor* + *Role Based Access Control Administrator* (o *Owner*) sobre el grupo: el Bicep crea asignaciones
    de rol.
 4. Cliente OAuth web de Google con orígenes autorizados `https://meaculpa.danielalonso.dev` (y el
    `*.azurestaticapps.net` de la SWA para probar antes del dominio).
 5. Variables del repo: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`,
    `GOOGLE_CLIENT_ID`. Sin `AZURE_RESOURCE_GROUP` el workflow de despliegue no hace nada.
-6. Tras el primer push, GHCR crea el paquete `mea-culpa-api` como **privado**: hazlo público (Package settings →
-   Change visibility) y relanza el workflow; el propio workflow lo comprueba y avisa.
-7. En Cloudflare, CNAME `meaculpa` → `defaultHostname` de la SWA en modo **DNS only**. Después, variable
-   `BIND_CUSTOM_DOMAIN=true` y relanzar: el Bicep asocia el dominio (si el CNAME no existe aún, esa validación falla).
+6. Primer despliegue manual del Bicep con la imagen de ejemplo (crea el ACR), `az acr build` y segundo despliegue con
+   `API_IMAGE` (ver abajo). A partir de ahí el workflow encuentra el ACR del grupo por sí solo.
+7. En Cloudflare, CNAME `meaculpa` → `defaultHostname` de la SWA en modo **DNS only** y
+   `az staticwebapp hostname set -n <swa> -g rg-mea-culpa --hostname meaculpa.danielalonso.dev` (o variable
+   `BIND_CUSTOM_DOMAIN=true` para que lo haga el Bicep; si el CNAME no existe aún, esa validación falla).
 
-Si se borra y se recrea el grupo con el mismo nombre, el recurso de Foundry anterior queda en *soft-delete* con el
-mismo nombre: antes, `az cognitiveservices account purge -g rg-mea-culpa -n meaculpa-ai-<sufijo> -l francecentral`.
+Si se borra el grupo, la cuenta de Foundry queda en *soft-delete*: para recrearla con el mismo nombre, antes
+`az cognitiveservices account purge -g rg-mea-culpa -n meaculpa-fc-7952 -l francecentral`.
 
 Despliegue manual equivalente:
 
 ```bash
-export API_IMAGE=ghcr.io/darkwerty/mea-culpa-api:<sha> GOOGLE_CLIENT_ID=<id>.apps.googleusercontent.com
+export GOOGLE_CLIENT_ID=<id>.apps.googleusercontent.com
+az deployment group create -g rg-mea-culpa -f infra/main.bicep -p infra/main.bicepparam   # 1.ª vez: crea el ACR
+az acr build -r <acr> -t mea-culpa-api:<sha> .
+export API_IMAGE=<acr>.azurecr.io/mea-culpa-api:<sha>
 az deployment group create -g rg-mea-culpa -f infra/main.bicep -p infra/main.bicepparam
 ```
 
@@ -314,8 +331,9 @@ en la calculadora de Azure antes de desplegar:
 | Container Apps (escala a cero, dentro de la concesión gratuita mensual) | ~0 € |
 | Log Analytics / App Insights (bajo la franja gratuita de 5 GB) | ~0 € |
 | Static Web Apps Free | 0 € |
+| Azure Container Registry Basic (coste fijo) | ~4,6 € |
 | Foundry: tokens (≈0,0005 $ por diagnóstico, ≈0,005 $ por partida contra el LLM) | < 1 € con 100 partidas |
-| **Total** | **~0–2 €/mes** |
+| **Total** | **~5–7 €/mes** |
 
 Ojo: el presupuesto **avisa, no corta**. Los topes reales son las cuotas por usuario, el fusible global de llamadas
 al LLM, los 10K TPM del deployment y el escalado máximo a 1 réplica. (El Storage account añade céntimos al mes.)

@@ -5,18 +5,25 @@ param prefix = 'meaculpa'
 param location = 'francecentral'
 
 // Los dos salen de variables de entorno que define .github/workflows/deploy.yml:
-//   API_IMAGE: ghcr.io/<owner>/mea-culpa-api:<sha> (sin ella, la imagen de ejemplo de Microsoft, para que un
-//              despliegue manual no se rompa).
+//   API_IMAGE: <acr>.azurecr.io/mea-culpa-api:<sha> (sin ella, la imagen de ejemplo de Microsoft, para el primer
+//              despliegue, con el ACR aún vacío).
 //   GOOGLE_CLIENT_ID: obligatoria; sin ella el .bicepparam no compila (y la API no arrancaría).
 param apiImage = readEnvironmentVariable('API_IMAGE', 'mcr.microsoft.com/k8se/quickstart:latest')
 param googleClientId = readEnvironmentVariable('GOOGLE_CLIENT_ID')
 
+// Cuenta de Foundry existente (francecentral). gpt-6-luna no tiene cuota en la suscripción (0 TPM), así que la demo
+// usa gpt-4.1-mini (GlobalStandard, 200K TPM de cuota disponibles), que además admite temperatura.
+param foundryAccountName = 'meaculpa-fc-7952'
+// Selector de modelo del rival IA. gpt-6-luna, gpt-6.1-terra y claude-haiku-5-5 están en el catálogo pero sin cuota
+// (0 TPM): al conseguirla, crea su deployment y añádelos aquí (ids de backend/meaculpa/models.py).
+param llmModels = 'gpt-4.1-mini'
+param claudeResourceName = 'meaculpa-swe-7952'
 param modelName = 'gpt-4.1-mini'
 param modelVersion = '2025-04-14'
 param modelSku = 'GlobalStandard'
 param modelCapacity = 10
 
-param corsOrigins = 'https://meaculpa.danielalonso.dev'
+param corsOrigins = 'https://danielalonso.dev,https://meaculpa.danielalonso.dev'
 param deployFrontend = true
 param webCustomDomain = 'meaculpa.danielalonso.dev'
 // Segundo despliegue: BIND_CUSTOM_DOMAIN=true cuando el CNAME meaculpa -> <defaultHostname> ya exista.

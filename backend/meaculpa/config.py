@@ -68,6 +68,9 @@ class Settings:
     # Solo se envían si se configuran (None = valor por defecto del proveedor).
     azure_reasoning_effort: str | None = None
     llm_max_tokens: int | None = None
+    # Modelos elegibles como rival IA (ids de models.MODEL_CATALOG) y el que se usa si no se elige ninguno.
+    llm_models: tuple[str, ...] = ()
+    llm_default_model: str | None = None
 
 
 @lru_cache
@@ -102,4 +105,6 @@ def get_settings() -> Settings:
         azure_auth=(os.environ.get("AZURE_AUTH") or "default").strip().lower(),
         azure_reasoning_effort=(os.environ.get("AZURE_OPENAI_REASONING_EFFORT") or "").strip() or None,
         llm_max_tokens=_env_int("LLM_MAX_TOKENS", 0) or None,
+        llm_models=tuple(m.strip() for m in os.environ.get("LLM_MODELS", "").split(",") if m.strip()),
+        llm_default_model=(os.environ.get("LLM_DEFAULT_MODEL") or "").strip() or None,
     )

@@ -20,16 +20,16 @@ from meaculpa.main import create_app
 
 KID = "clave-test"
 PROTECTED = [
-    ("GET", "/api/opponents"),
-    ("GET", "/api/games"),
-    ("POST", "/api/games"),
-    ("GET", "/api/games/abcdef123456"),
-    ("POST", "/api/games/abcdef123456/move"),
-    ("POST", "/api/games/abcdef123456/resign"),
-    ("POST", "/api/games/abcdef123456/analysis"),
-    ("GET", "/api/games/abcdef123456/analysis"),
-    ("POST", "/api/analysis/pgn"),
-    ("GET", "/api/metrics/llm"),
+    ("GET", "/api/meaculpa/opponents"),
+    ("GET", "/api/meaculpa/games"),
+    ("POST", "/api/meaculpa/games"),
+    ("GET", "/api/meaculpa/games/abcdef123456"),
+    ("POST", "/api/meaculpa/games/abcdef123456/move"),
+    ("POST", "/api/meaculpa/games/abcdef123456/resign"),
+    ("POST", "/api/meaculpa/games/abcdef123456/analysis"),
+    ("GET", "/api/meaculpa/games/abcdef123456/analysis"),
+    ("POST", "/api/meaculpa/analysis/pgn"),
+    ("GET", "/api/meaculpa/metrics/llm"),
 ]
 
 
@@ -84,7 +84,7 @@ def google_client(settings, google_keys):
 
 
 def _get(client, token):
-    return client.get("/api/opponents", headers={"Authorization": f"Bearer {token}"})
+    return client.get("/api/meaculpa/opponents", headers={"Authorization": f"Bearer {token}"})
 
 
 def test_valid_google_token_is_accepted(google_client, google_keys):
@@ -131,13 +131,13 @@ def test_every_route_but_health_requires_login(settings, make_client, method, pa
     assert client.request(method, path, json={}).status_code == 401
     assert client.request(method, path, json={}, headers={"Authorization": "Basic abc"}).status_code == 401
     assert client.request(method, path, json={}, headers={"Authorization": "Bearer x:firma"}).status_code == 401
-    assert client.get("/api/health").status_code == 200
+    assert client.get("/api/meaculpa/health").status_code == 200
 
 
 @pytest.mark.parametrize("defect", ["aud", "iss", "exp", "email", "firma"])
 def test_claims_are_checked_even_if_the_verifier_lets_them_through(settings, make_client, defect):
     client = make_client(settings, user=f"ana:{defect}")
-    assert client.get("/api/games").status_code == 401
+    assert client.get("/api/meaculpa/games").status_code == 401
 
 
 def test_api_does_not_start_without_google_client_id(settings):
@@ -153,7 +153,7 @@ def test_docs_and_openapi_are_not_published(settings, make_client):
 
 def test_security_headers_and_cors(settings, make_client):
     client = make_client(dataclasses.replace(settings, cors_origins=("https://meaculpa.danielalonso.dev",)))
-    res = client.get("/api/health")
+    res = client.get("/api/meaculpa/health")
     assert res.headers["X-Content-Type-Options"] == "nosniff"
     assert "frame-ancestors 'none'" in res.headers["Content-Security-Policy"]
     preflight = {
@@ -161,10 +161,10 @@ def test_security_headers_and_cors(settings, make_client):
         "Access-Control-Request-Method": "POST",
         "Access-Control-Request-Headers": "authorization,content-type",
     }
-    ok = client.options("/api/games", headers=preflight)
+    ok = client.options("/api/meaculpa/games", headers=preflight)
     assert ok.status_code == 200
     assert ok.headers["access-control-allow-origin"] == "https://meaculpa.danielalonso.dev"
-    evil = client.options("/api/games", headers={**preflight, "Origin": "https://evil.example"})
+    evil = client.options("/api/meaculpa/games", headers={**preflight, "Origin": "https://evil.example"})
     assert "access-control-allow-origin" not in evil.headers
 
 

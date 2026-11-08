@@ -35,15 +35,15 @@ export function useApi() {
   }
 
   return {
-    health: () => call<any>('/api/health'),
-    opponents: () => call<any>('/api/opponents'),
-    newGame: (body: any) => call<GameState>('/api/games', { method: 'POST', body }),
-    move: (id: string, uci: string) => call<GameState>(`/api/games/${id}/move`, { method: 'POST', body: { uci } }),
-    resign: (id: string) => call<GameState>(`/api/games/${id}/resign`, { method: 'POST' }),
-    game: (id: string) => call<GameState>(`/api/games/${id}`),
-    getAnalysis: (id: string) => call<any>(`/api/games/${id}/analysis`),
-    analyse: (id: string) => call<any>(`/api/games/${id}/analysis`, { method: 'POST' }),
-    games: () => call<any[]>('/api/games'),
-    metrics: () => call<any>('/api/metrics/llm'),
+    health: () => call<any>('/api/meaculpa/health'),
+    opponents: () => call<any>('/api/meaculpa/opponents'),
+    newGame: (body: any) => call<GameState>('/api/meaculpa/games', { method: 'POST', body }),
+    move: (id: string, uci: string) => call<GameState>(`/api/meaculpa/games/${id}/move`, { method: 'POST', body: { uci } }),
+    resign: (id: string) => call<GameState>(`/api/meaculpa/games/${id}/resign`, { method: 'POST' }),
+    game: (id: string) => call<GameState>(`/api/meaculpa/games/${id}`),
+    getAnalysis: (id: string) => call<any>(`/api/meaculpa/games/${id}/analysis`),
+    analyse: (id: string) => call<any>(`/api/meaculpa/games/${id}/analysis`, { method: 'POST' }),
+    games: () => call<any[]>('/api/meaculpa/games'),
+    metrics: () => call<any>('/api/meaculpa/metrics/llm'),
   }
 }

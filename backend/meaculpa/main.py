@@ -39,6 +39,7 @@ from .games import (
 )
 from .llm import LLMProvider, get_provider
 from .llm_player import MetricsStore
+from .models import CATALOG_BY_ID, build_model_providers, model_catalog
 from .quota import UsageLimiter
 from .storage import ObjectStore, make_object_store
 
@@ -63,6 +64,7 @@ class OpponentConfig(BaseModel):
     skill: int = Field(5, ge=0, le=20)
     temperature: float | None = Field(None, ge=0.0, le=2.0)  # None = valor por defecto del proveedor
     show_legal_moves: bool = False
+    model: str | None = Field(None, max_length=40)  # id del catálogo de modelos (solo para type="llm")
 
 
 class NewGameRequest(BaseModel):
@@ -78,6 +80,9 @@ class PgnAnalysisRequest(BaseModel):
     pgn: str = Field(..., max_length=20_000)
     user_color: Literal["white", "black"]
 
+
+# Todas las rutas cuelgan de aquí: la API se sirve en danielalonso.dev/api/meaculpa (backend enlazado a la SWA).
+API_PREFIX = "/api/meaculpa"
 
 OPPONENT_NAMES = {
     "random": "Aleatorio",
@@ -109,14 +114,23 @@ def create_app(
     provider: LLMProvider | None = None,
     token_verifier: TokenVerifier | None = None,
     objects: ObjectStore | None = None,
+    models: dict[str, LLMProvider] | None = None,
 ) -> FastAPI:
-    """Crea la API. Sin GOOGLE_CLIENT_ID no arranca: todas las rutas salvo /api/health exigen login."""
+    """Crea la API. Sin GOOGLE_CLIENT_ID no arranca: todas las rutas salvo salud y modelos exigen login.
+
+    `models`: rivales IA elegibles por id (por defecto, los de LLM_MODELS; sin ninguno, solo `provider`).
+    """
     settings = settings or get_settings()
     if not settings.google_client_id:
         raise RuntimeError("Falta GOOGLE_CLIENT_ID: la API exige login con Google y no arranca sin él")
     client_id = settings.google_client_id
     verifier = token_verifier or google_verifier(client_id)
     provider = provider or get_provider(settings)
+    if models is None:
+        models = build_model_providers(settings) if settings.llm_provider != "mock" else {}
+    if not models:
+        models = {provider.name: provider}
+    default_model = settings.llm_default_model if settings.llm_default_model in models else next(iter(models))
     objects = objects or make_object_store(settings)
     store = GameStore(objects)
     limiter = UsageLimiter(objects, settings)
@@ -162,7 +176,8 @@ def create_app(
         if game.opponent.get("type") == "llm":
             limiter.consume(user.owner, "jugadas_llm")
             limiter.consume_llm_calls(1 + settings.llm_max_retries)  # peor caso: todos los reintentos
-        opp = build_opponent(game.opponent, provider, metrics, settings.llm_max_retries)
+        llm = models.get(game.opponent.get("model") or default_model, provider)
+        opp = build_opponent(game.opponent, llm, metrics, settings.llm_max_retries)
         t0 = time.perf_counter()
         decision = opp.choose_move(board)
         meta = dict(decision.meta)
@@ -196,11 +211,11 @@ def create_app(
         finally:
             analysis_slots.release()
 
-    @app.get("/api/health")
+    @app.get(API_PREFIX + "/health")
     def health() -> dict[str, Any]:
         return {"ok": True}
 
-    @app.get("/api/opponents")
+    @app.get(API_PREFIX + "/opponents")
     def opponents(user: CurrentUser) -> dict[str, Any]:
         stockfish = find_stockfish() is not None
         return {
@@ -210,16 +225,31 @@ def create_app(
                 "modelo": provider.name,
                 "max_reintentos": settings.llm_max_retries,
             },
+            "modelos": model_catalog(models, default_model),
             "stockfish": stockfish,
             "motor_analisis": "Stockfish" if stockfish else f"alfa-beta propio (profundidad {settings.analysis_depth})",
             "limites_diarios": limiter.limits,
             "usuario": user.name,
         }
 
-    @app.post("/api/games")
+    @app.get(API_PREFIX + "/models")
+    def list_models() -> dict[str, Any]:
+        """Público (sin login): el selector de modelo se pinta antes de entrar con Google."""
+        return {"modelos": model_catalog(models, default_model), "por_defecto": default_model}
+
+    @app.post(API_PREFIX + "/games")
     def new_game(req: NewGameRequest, user: CurrentUser) -> dict[str, Any]:
         cfg = req.opponent.model_dump()
         cfg["nombre"] = OPPONENT_NAMES[req.opponent.type]
+        if req.opponent.type == "llm":
+            model_id = req.opponent.model or default_model
+            if model_id not in models:
+                raise HTTPException(400, "Ese modelo no está disponible ahora mismo")
+            cfg["model"] = model_id
+            spec = CATALOG_BY_ID.get(model_id)
+            cfg["modelo_etiqueta"] = f"{spec.etiqueta}, {spec.descripcion.lower()}" if spec else models[model_id].name
+        else:
+            cfg.pop("model", None)
         if req.opponent.type == "stockfish" and not find_stockfish():
             raise HTTPException(400, "Stockfish no está disponible en este equipo")
         limiter.consume(user.owner, "partidas")
@@ -232,7 +262,7 @@ def create_app(
         _save(game)
         return game_state(game)
 
-    @app.get("/api/games")
+    @app.get(API_PREFIX + "/games")
     def list_games(user: CurrentUser) -> list[dict[str, Any]]:
         return [
             {
@@ -249,11 +279,11 @@ def create_app(
             for g in store.recent(user.owner, limit=20)
         ]
 
-    @app.get("/api/games/{game_id}")
+    @app.get(API_PREFIX + "/games/{game_id}")
     def get_game(game_id: str, user: CurrentUser) -> dict[str, Any]:
         return game_state(_get(user, game_id))
 
-    @app.post("/api/games/{game_id}/move")
+    @app.post(API_PREFIX + "/games/{game_id}/move")
     def play_move(game_id: str, req: MoveRequest, user: CurrentUser) -> dict[str, Any]:
         game = _get(user, game_id)
         if game.status != "en_curso":
@@ -277,7 +307,7 @@ def create_app(
         _save(game)
         return game_state(game)
 
-    @app.post("/api/games/{game_id}/resign")
+    @app.post(API_PREFIX + "/games/{game_id}/resign")
     def resign(game_id: str, user: CurrentUser) -> dict[str, Any]:
         game = _get(user, game_id)
         if game.status == "en_curso":
@@ -291,7 +321,7 @@ def create_app(
     def _analysis_payload(game: GameRecord) -> dict[str, Any]:
         return {"game_id": game.id, "analisis": game.analysis, **(game.diagnosis or {})}
 
-    @app.post("/api/games/{game_id}/analysis")
+    @app.post(API_PREFIX + "/games/{game_id}/analysis")
     def analyse_game(game_id: str, user: CurrentUser) -> dict[str, Any]:
         game = _get(user, game_id)
         if not any((i % 2 == 0) == (game.user_color == "white") for i in range(len(game.moves))):
@@ -316,14 +346,14 @@ def create_app(
         _save(game)
         return _analysis_payload(game)
 
-    @app.get("/api/games/{game_id}/analysis")
+    @app.get(API_PREFIX + "/games/{game_id}/analysis")
     def get_analysis(game_id: str, user: CurrentUser) -> dict[str, Any]:
         game = _get(user, game_id)
         if game.analysis is None:
             raise HTTPException(404, "Esta partida aún no tiene análisis")
         return _analysis_payload(game)
 
-    @app.post("/api/analysis/pgn")
+    @app.post(API_PREFIX + "/analysis/pgn")
     def analyse_pgn(req: PgnAnalysisRequest, user: CurrentUser) -> dict[str, Any]:
         """Analiza un PGN externo (dato no fiable: se valida y se reconstruye sin comentarios ni cabeceras)."""
         try:
@@ -343,7 +373,7 @@ def create_app(
             diag = diagnose(analysis, provider, pgn, "desconocido", history, settings=settings)
         return {"analisis": analysis.to_dict(), **asdict(diag)}
 
-    @app.get("/api/metrics/llm")
+    @app.get(API_PREFIX + "/metrics/llm")
     def llm_metrics(user: CurrentUser) -> dict[str, Any]:
         return {"resumen": metrics.summary()}
 

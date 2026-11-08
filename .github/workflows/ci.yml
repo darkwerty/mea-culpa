@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
 
 # Mínimo privilegio: el GITHUB_TOKEN de este workflow solo puede leer el repo.

@@ -2,7 +2,10 @@
 //
 // Despliega en un grupo de recursos:
 //   - Log Analytics + Application Insights (telemetría de la API)
-//   - Recurso de Microsoft Foundry (Cognitive Services kind AIServices) con un deployment de modelo de chat
+//   - Deployment de modelo de chat en un recurso de Microsoft Foundry YA EXISTENTE del mismo grupo
+//     (foundryAccountName; se reutiliza la cuenta del experimento en vez de crear otra)
+//   - Azure Container Registry Basic (privado, sin usuario admin) para la imagen de la API: la Container App
+//     la descarga con su identidad administrada (rol AcrPull). Coste fijo ~4,6 €/mes.
 //   - Identidad administrada asignada por el usuario con el rol "Cognitive Services OpenAI User"
 //     sobre el recurso de Foundry (sin claves: disableLocalAuth = true)
 //   - Storage account (Blob, sin claves compartidas) para partidas y cuotas, con el rol
@@ -12,9 +15,10 @@
 //   - Presupuesto mensual con alertas por correo
 //
 // Uso (lo normal es que lo lance .github/workflows/deploy.yml):
-//   az group create -n rg-mea-culpa -l francecentral
-//   az deployment group create -g rg-mea-culpa -f infra/main.bicep -p infra/main.bicepparam \
-//     -p apiImage=ghcr.io/<owner>/mea-culpa-api:<sha> googleClientId=<id>.apps.googleusercontent.com
+//   GOOGLE_CLIENT_ID=<id>.apps.googleusercontent.com az deployment group create -g rg-mea-culpa \
+//     -f infra/main.bicep -p infra/main.bicepparam            (primera vez: imagen de ejemplo)
+//   az acr build -r <acr> -t mea-culpa-api:<tag> .               (construye la imagen en la nube)
+//   API_IMAGE=<acr>.azurecr.io/mea-culpa-api:<tag> GOOGLE_CLIENT_ID=... az deployment group create ...
 
 targetScope = 'resourceGroup'
 
@@ -26,7 +30,7 @@ param prefix string = 'meaculpa'
 @description('Región de los recursos (la del modelo debe tener cuota para el deployment elegido)')
 param location string = resourceGroup().location
 
-@description('Imagen de la API (pública en GHCR). La de por defecto es solo un marcador para que el despliegue no falle.')
+@description('Imagen de la API (en el ACR de este despliegue). La de por defecto es solo un marcador para el primer despliegue.')
 param apiImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
 
 @description('Client ID del cliente OAuth web de Google (Google Identity Services). La API no arranca sin él.')
@@ -35,6 +39,15 @@ param googleClientId string
 
 @description('Puerto en el que escucha el contenedor')
 param apiPort int = 8000
+
+@description('Nombre de la cuenta de Microsoft Foundry (AIServices) existente en este grupo de recursos')
+param foundryAccountName string
+
+@description('Modelos elegibles como rival IA, separados por comas (solo los que tengan deployment y cuota)')
+param llmModels string = 'gpt-4.1-mini'
+
+@description('Recurso de Foundry con el deployment de Claude (Messages API); vacío si no hay')
+param claudeResourceName string = ''
 
 @description('Modelo de chat a desplegar en Foundry (comprueba disponibilidad y versión en tu región)')
 param modelName string = 'gpt-4.1-mini'
@@ -80,7 +93,10 @@ param budgetEmails array
 param budgetStartDate string = utcNow('yyyy-MM-01')
 
 var suffix = uniqueString(resourceGroup().id)
-var foundryName = '${prefix}-ai-${suffix}'
+var foundryName = foundryAccountName
+var acrName = take(toLower('${prefix}acr${suffix}'), 50)
+// Rol integrado "AcrPull": descargar imágenes del registro.
+var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 // Rol integrado "Cognitive Services OpenAI User": inferencia sin poder gestionar el recurso.
 var openAiUserRoleId = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
 // Rol integrado "Storage Blob Data Contributor": leer y escribir blobs, sin gestionar la cuenta.
@@ -116,18 +132,9 @@ resource apiIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-3
 }
 
 // ---------------------------------------------------------------- Microsoft Foundry
-resource foundry 'Microsoft.CognitiveServices/accounts@2025-06-01' = {
+// Cuenta existente (creada para el experimento, con disableLocalAuth = true y subdominio propio).
+resource foundry 'Microsoft.CognitiveServices/accounts@2025-06-01' existing = {
   name: foundryName
-  location: location
-  kind: 'AIServices'
-  sku: { name: 'S0' }
-  identity: { type: 'SystemAssigned' }
-  properties: {
-    customSubDomainName: foundryName
-    disableLocalAuth: true // solo Entra ID: nada de claves en variables de entorno
-    publicNetworkAccess: 'Enabled'
-    allowProjectManagement: true
-  }
 }
 
 resource chatModel 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = {
@@ -152,6 +159,27 @@ resource apiCanCallModel 'Microsoft.Authorization/roleAssignments@2022-04-01' = 
   scope: foundry
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', openAiUserRoleId)
+    principalId: apiIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// ---------------------------------------------------------------- registro de contenedores
+resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
+  name: acrName
+  location: location
+  sku: { name: 'Basic' }
+  properties: {
+    adminUserEnabled: false // la Container App tira con su identidad administrada
+    publicNetworkAccess: 'Enabled'
+  }
+}
+
+resource apiCanPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(acr.id, apiIdentity.id, acrPullRoleId)
+  scope: acr
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPullRoleId)
     principalId: apiIdentity.properties.principalId
     principalType: 'ServicePrincipal'
   }
@@ -252,6 +280,9 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = {
         transport: 'auto'
         allowInsecure: false
       }
+      registries: [
+        { server: acr.properties.loginServer, identity: apiIdentity.id }
+      ]
       secrets: [
         { name: 'appinsights-conn', value: appInsights.properties.ConnectionString }
       ]
@@ -269,6 +300,10 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'LLM_PROVIDER', value: 'azure' }
             { name: 'AZURE_OPENAI_ENDPOINT', value: 'https://${foundryName}.openai.azure.com/' }
             { name: 'AZURE_OPENAI_DEPLOYMENT', value: chatModel.name }
+            // Rivales IA elegibles (ids de backend/meaculpa/models.py) y recurso de Claude en Foundry.
+            { name: 'LLM_MODELS', value: llmModels }
+            { name: 'LLM_DEFAULT_MODEL', value: chatModel.name }
+            { name: 'ANTHROPIC_FOUNDRY_RESOURCE', value: claudeResourceName }
             // DefaultAzureCredential usa esta identidad administrada:
             { name: 'AZURE_CLIENT_ID', value: apiIdentity.properties.clientId }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: 'appinsights-conn' }
@@ -298,6 +333,7 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = {
   dependsOn: [
     apiCanCallModel
     apiCanUseStorage
+    apiCanPull
     gamesContainer
   ]
 }
@@ -366,4 +402,6 @@ output webUrl string = deployFrontend ? 'https://${web!.properties.defaultHostna
 output webName string = deployFrontend ? web.name : ''
 output webDefaultHostname string = deployFrontend ? web!.properties.defaultHostname : ''
 output storageAccountName string = storage.name
+output acrName string = acr.name
+output acrLoginServer string = acr.properties.loginServer
 output apiIdentityClientId string = apiIdentity.properties.clientId
