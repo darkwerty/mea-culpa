@@ -89,3 +89,15 @@ def test_stockfish_is_hidden_when_missing(settings, monkeypatch):
     client = _client(settings)
     assert "stockfish" not in [o["id"] for o in client.get("/api/opponents").json()["clasicos"]]
     assert client.post("/api/games", json={"opponent": {"type": "stockfish"}}).status_code == 400
+
+
+def test_analysis_can_be_fetched_after_reload(settings):
+    client = _client(settings)
+    gid = client.post("/api/games", json={"opponent": {"type": "greedy"}}).json()["id"]
+    assert client.get(f"/api/games/{gid}/analysis").status_code == 404
+    client.post(f"/api/games/{gid}/move", json={"uci": "f2f3"})
+    client.post(f"/api/games/{gid}/resign")
+    posted = client.post(f"/api/games/{gid}/analysis").json()
+    fetched = client.get(f"/api/games/{gid}/analysis").json()
+    assert fetched["diagnostico"] == posted["diagnostico"]
+    assert client.get(f"/api/games/{gid}").json()["has_diagnosis"]

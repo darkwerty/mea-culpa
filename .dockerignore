@@ -1,0 +1,7 @@
+.venv
+web
+infra
+eval
+.git
+data/runtime
+**/__pycache__

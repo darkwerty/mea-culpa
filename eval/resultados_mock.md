@@ -1,6 +1,6 @@
 # Evaluación de Mea culpa — proveedor `mock` / modelo `mock-llm`
 
-Motor de análisis: alfa-beta propio (profundidad 3). Partidas: 6. Fecha: 2026-11-08 14:59.
+Motor de análisis: alfa-beta propio (profundidad 3). Partidas: 6. Fecha: 2026-11-08 15:16.
 
 > ⚠️ Proveedor **mock**: estas cifras validan el pipeline (motor → hechos → LLM → validación),
 > no la calidad de ningún modelo. El mock elige siempre la mayor caída, así que la coincidencia
@@ -10,12 +10,12 @@ Motor de análisis: alfa-beta propio (profundidad 3). Partidas: 6. Fecha: 2026-1
 
 | Partida | Mayor caída (motor) | Error principal (LLM) | ¿Coincide? | ¿Patrón OK? | Inventados descartados | Motor | LLM | Coste |
 |---|---|---|:-:|:-:|:-:|--:|--:|--:|
-| inmortal_1851 | 18. Bxg1 (−350 cp) | Bxg1 | ✅ | ✅ | 0 | 14.6 s | 0 ms | $0.00043 |
-| legal_1750 | 5. Bxd1 (−835 cp) | Bxd1 | ✅ | ✅ | 0 | 2.5 s | 0 ms | $0.00044 |
+| inmortal_1851 | 18. Bxg1 (−350 cp) | Bxg1 | ✅ | ✅ | 0 | 13.6 s | 0 ms | $0.00043 |
+| legal_1750 | 5. Bxd1 (−835 cp) | Bxd1 | ✅ | ✅ | 0 | 2.4 s | 0 ms | $0.00044 |
 | mate_del_loco | 2. g4 (−930 cp) | g4 | ✅ | ✅ | 0 | 0.2 s | 0 ms | $0.00047 |
 | mate_del_pastor | 3. Nf6 (−1025 cp) | Nf6 | ✅ | ✅ | 0 | 1.3 s | 0 ms | $0.00047 |
-| opera_1858 | 15. Nxd7 (−600 cp) | Nxd7 | ✅ | ✅ | 0 | 7.2 s | 0 ms | $0.00056 |
-| siempreviva_1852 | 7. d3 (−195 cp) | d3 | ✅ | ✅ | 0 | 29.7 s | 0 ms | $0.00057 |
+| opera_1858 | 15. Nxd7 (−600 cp) | Nxd7 | ✅ | ✅ | 0 | 7.1 s | 0 ms | $0.00056 |
+| siempreviva_1852 | 7. d3 (−195 cp) | d3 | ✅ | ✅ | 0 | 28.7 s | 0 ms | $0.00057 |
 
 - Coincidencia error principal ↔ mayor caída del motor: **100%**
 - Patrón del error principal dentro de las etiquetas del motor: **100%**
