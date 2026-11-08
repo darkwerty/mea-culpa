@@ -234,8 +234,8 @@ públicos y solo leen esa foto fija (caché de 60 s), así que mirar el ranking 
 en el cuerpo de cada partida nueva como `ranking`). El nombre es el de pila del token de Google verificado; sin correo
 ni foto. `RankingStore.export_rows()` saca todas las filas para migrarlas a otro almacén. Las partidas «con ayuda»
 (pistas o jugadas deshechas) se guardan igual, pero no entran en el ranking ni en «Humanos contra IA»; si una partida
-ya terminada se reabre deshaciendo jugadas, se quita del ranking (necesita el permiso de
-`infra/sql/004_ranking_borrar_permisos.sql`).
+ya terminada sin ayuda se reabre deshaciendo jugadas, su primer resultado se queda en el ranking (si se quitara,
+cualquiera podría borrar sus derrotas deshaciendo) y lo que pase después ya no cuenta.
 
 ### Barra de evaluación, pistas y deshacer
 
@@ -244,8 +244,9 @@ ya terminada se reabre deshaciendo jugadas, se quita del ranking (necesita el pe
 otro. Sin Stockfish se usa el alfa-beta propio.
 
 - `POST /api/meaculpa/eval` `{"fen"}`: solo motor (`EVAL_TIME_MS` 200, `EVAL_DEPTH` 14), sin LLM ni base de datos.
-  Devuelve `cp` o `mate` desde las blancas, `best_uci`, `best_san`, `pv_san` (hasta 6), `depth`, y `resultado` y `fin`
-  si la posición ya ha terminado (en el mate, `mate` = 0). Límite por persona en memoria: de media una cada
+  Devuelve `cp` o `mate` desde las blancas, `depth`, y `resultado` y `fin` si la posición ya ha terminado (en el
+  mate, `mate` = 0). `best_uci`, `best_san` y `pv_san` van siempre vacíos: la mejor jugada solo sale por `/hint`, que
+  marca la partida «con ayuda». Límite por persona en memoria: de media una cada
   `EVAL_INTERVAL_MS` (150) y `EVAL_PER_DAY` (5000) al día. 422 si el FEN no vale, 429 si se pasa del límite, 503 si
   el motor está ocupado o no responde.
 - `POST /api/meaculpa/games/{id}/hint`: mejor jugada de la posición actual (`HINT_TIME_MS` 600, `HINT_DEPTH` 18, dos

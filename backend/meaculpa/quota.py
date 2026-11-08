@@ -85,6 +85,21 @@ class UsageLimiter:
         if not self._increment(f"usage/{self._day()}/{owner}", kind, amount, limit):
             raise HTTPException(429, f"Has llegado al límite diario de {KIND_LABELS[kind]} ({limit}). Vuelve mañana.")
 
+    def refund(self, owner: str, kind: str, amount: int = 1) -> None:
+        """Devuelve lo descontado por algo que al final no se ha entregado (nunca baja de 0). No falla nunca."""
+        key = f"usage/{self._day()}/{owner}"
+        for _ in range(self.MAX_RETRIES):
+            found = self.objects.read(key)
+            if found is None:
+                return
+            counts = json.loads(found[0])
+            current = int(counts.get(kind, 0))
+            if current <= 0:
+                return
+            counts[kind] = max(0, current - amount)
+            if self.objects.write(key, json.dumps(counts).encode(), etag=found[1]) is not None:
+                return
+
     def cents_limit(self) -> int:
         default = self.global_cents_limit
         return self.overrides("ia_centimos_dia", default) if self.overrides else default

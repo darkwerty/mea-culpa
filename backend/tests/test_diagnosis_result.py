@@ -219,3 +219,65 @@ def test_fallback_headlines_are_coherent():
     assert (
         fallback_headline("derrota", "rey_en_el_centro", True) == "Otra vez has perdido por dejar el rey en el centro"
     )
+
+
+def test_contradiction_detector_catches_other_ways_of_saying_it():
+    lost = [
+        "Otra vez pierdes por dejar el rey en el centro",
+        "Pierdes la partida por no enrocar",
+        "Derrota por dejar el rey en el centro",
+        "Te ha ganado por no enrocar a tiempo",
+        "Te ganó la IA por dejar piezas sin defender",
+        "Has acabado perdiendo por un cambio desfavorable",
+        "Acabaste perdiendo con el rey en el centro",
+        "Partida perdida por un cambio desfavorable",
+        "Fuiste derrotado por no enrocar",
+        "Mal día: derrota con el rey en el centro",
+    ]
+    for text in lost:
+        assert contradictions(text, "victoria") == ["has perdido"], text
+        assert contradictions(text, "derrota") == [], text
+    won = ["Ganas la partida pese a todo", "Victoria pese a dejar el rey en el centro", "Acabas ganando con sustos"]
+    for text in won:
+        assert contradictions(text, "derrota") == ["has ganado"], text
+        assert contradictions(text, "victoria") == [], text
+    assert contradictions("Empatas por no rematar", "victoria") == ["has hecho tablas"]
+    # Frases que no hablan del resultado.
+    innocent = [
+        "Has ganado, aunque pierdes la iniciativa en la jugada 14",
+        "Con ganas de atacar, dejaste el rey en el centro",
+        "Pierdes material si no miras las amenazas",
+        "Ganas tiempo si desarrollas antes de sacar la dama",
+        "Te ha ganado la calidad con un truco táctico",
+        "Has ganado, pero casi la regalas por dejar el rey en el centro",
+    ]
+    for text in innocent:
+        assert contradictions(text, "victoria") == [], text
+
+
+def test_otra_vez_at_the_start_of_the_advice_needs_history():
+    diag = {"titular": "Has ganado, pero casi la regalas", "consejo": "Otra vez: enroca antes de atacar", "errores": []}
+    assert coherence_problems(diag, "victoria", again_allowed=False)
+    assert coherence_problems(diag, "victoria", again_allowed=True) == []
+    diag["consejo"] = "Enroca pronto para que no te pase otra vez"
+    assert coherence_problems(diag, "victoria", again_allowed=False) == []
+
+
+def test_resignation_reaches_the_prompt_and_the_fallback(pgn_text, settings):
+    analysis = _analysis(pgn_text)
+    history = history_counts([], analysis.patrones_partida)
+    messages = diagnosis_messages("1. e4", "derrota", "blancas", [], history, [], "abandono")
+    assert "<fin>abandono</fin>" in messages[1]["content"] and "SE RINDIÓ" in messages[1]["content"]
+    assert "<fin>" not in diagnosis_messages("1. e4", "en curso", "blancas", [], history, [], "abandono")[1]["content"]
+    mate = diagnosis_messages("1. e4", "derrota", "blancas", [], history, [], "jaque mate")[1]["content"]
+    assert "<fin>jaque mate</fin>" in mate and "SE RINDIÓ" not in mate
+    assert fallback_headline("derrota", None, False, "abandono").startswith("Te rendiste")
+    assert fallback_headline("derrota", "pieza_colgada", False, "abandono") == (
+        "Te rendiste, y tu error más caro fue dejar piezas sin defender"
+    )
+    # Con el titular contradictorio en una derrota por abandono, el respaldo habla de la rendición.
+    provider = ScriptedDiagnosis(["Has ganado de milagro"])
+    result = diagnose(analysis, provider, "1. e4", "derrota", history, settings=settings, end_reason="abandono")
+    assert result.grounding["coherencia"] == "respaldo" and result.grounding["fin"] == "abandono"
+    assert result.diagnostico["titular"].startswith("Te rendiste")
+    assert "<fin>abandono</fin>" in provider.calls[0][1]["content"]

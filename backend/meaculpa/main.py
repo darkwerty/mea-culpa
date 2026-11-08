@@ -167,6 +167,18 @@ def make_database(settings: Settings) -> Database:
 CurrentUser = Annotated[User, Depends(current_user)]
 
 
+_HELP_FIELDS = ("con_ayuda", "ayudas", "etag")
+
+
+def _snapshot(game: GameRecord) -> dict[str, Any]:
+    """Copia profunda de la partida tal como se ha leído, para comparar al guardar."""
+    return asdict(game)
+
+
+def _without_help(data: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in data.items() if k not in _HELP_FIELDS}
+
+
 def create_app(
     settings: Settings | None = None,
     provider: LLMProvider | None = None,
@@ -300,11 +312,31 @@ def create_app(
             raise HTTPException(404, "Partida no encontrada")
         return game
 
-    def _save(game: GameRecord) -> None:
+    def _save(game: GameRecord, base: dict[str, Any] | None = None) -> None:
+        """Guarda con control de versión. `base`: la partida tal como se leyó (`_snapshot`).
+
+        Si entretanto otra petición solo ha marcado ayuda (una pista pedida a la vez que una jugada), no se pierde
+        ninguna de las dos: se suman las ayudas sobre la versión nueva y se vuelve a guardar. Cualquier otro cambio
+        (otra jugada, deshacer...) es un conflicto de verdad: 409.
+        """
         try:
             store.save(game)
         except GameConflictError as exc:
-            raise HTTPException(409, "La partida ha cambiado en otra pestaña; recárgala") from exc
+            fresh = store.get(game.owner, game.id) if base is not None else None
+            if fresh is None or _without_help(_snapshot(fresh)) != _without_help(base or {}):
+                raise HTTPException(409, "La partida ha cambiado en otra pestaña; recárgala") from exc
+            before = base.get("ayudas") or {} if base else {}
+            mine = game.ayudas or {}
+            theirs = fresh.ayudas or {}
+            game.ayudas = {
+                k: int(theirs.get(k, 0)) + int(mine.get(k, 0)) - int(before.get(k, 0)) for k in ("pistas", "deshacer")
+            }
+            game.con_ayuda = game.con_ayuda or fresh.con_ayuda
+            game.etag = fresh.etag
+            try:
+                store.save(game)
+            except GameConflictError as exc2:
+                raise HTTPException(409, "La partida ha cambiado en otra pestaña; recárgala") from exc2
         try:
             data.save_game(chess_row(game, time.time()))  # copia en SQL para /admin (cola en segundo plano)
         except Exception:  # noqa: BLE001 - nunca rompe la partida
@@ -456,6 +488,7 @@ def create_app(
     @app.post(API_PREFIX + "/games/{game_id}/move")
     def play_move(game_id: str, req: MoveRequest, user: CurrentUser) -> dict[str, Any]:
         game = _get(user, game_id)
+        base = _snapshot(game)
         if game.status != "en_curso":
             raise HTTPException(409, "La partida ya ha terminado")
         board = game.board()
@@ -475,19 +508,20 @@ def create_app(
         finish_if_over(game, board)
         if game.status == "en_curso":
             _opponent_move(user, game, board)
-        _save(game)
+        _save(game, base)
         _rank(user, game)
         return game_state(game)
 
     @app.post(API_PREFIX + "/games/{game_id}/resign")
     def resign(game_id: str, user: CurrentUser) -> dict[str, Any]:
         game = _get(user, game_id)
+        base = _snapshot(game)
         if game.status == "en_curso":
             game.status = "terminada"
             game.resultado_usuario = "derrota"
             game.motivo_fin = "abandono"
             game.result = "0-1" if game.user_color == "white" else "1-0"
-            _save(game)
+            _save(game, base)
             _rank(user, game)
         return game_state(game)
 
@@ -510,7 +544,9 @@ def create_app(
                 analyzer.close()
             history = history_counts(store.previous_patterns(user.owner, game.id), analysis.patrones_partida)
             result_text = player_result(game.resultado_usuario)
-            diag = diagnose(analysis, provider, game.pgn(), result_text, history, settings=settings)
+            diag = diagnose(
+                analysis, provider, game.pgn(), result_text, history, settings=settings, end_reason=game.motivo_fin
+            )
             limiter.add_cost(diag.coste_usd, user.owner)
             if diag.llamadas > 1:  # reintento por incoherencia con el resultado: cuenta en el fusible, sin cortar
                 with suppress(HTTPException):
@@ -605,6 +641,7 @@ def create_app(
     def hint(game_id: str, user: CurrentUser) -> dict[str, Any]:
         """La mejor jugada para la posición actual, los motivos del motor y por qué (LLM o, si falla, sin LLM)."""
         game = _get(user, game_id)
+        base = _snapshot(game)
         if game.status != "en_curso":
             raise HTTPException(409, "La partida ya ha terminado")
         board = game.board()
@@ -645,7 +682,12 @@ def create_app(
             usd=text.coste_usd,
         )
         mark_help(game, "pistas")
-        _save(game)
+        try:
+            _save(game, base)
+        except HTTPException as exc:
+            # Has movido (o deshecho) mientras se calculaba: la pista ya no vale para la posición y no se cobra.
+            limiter.refund(user.owner, "pistas")
+            raise HTTPException(409, "La partida ha cambiado mientras se calculaba la pista; vuelve a pedirla") from exc
         if after_terminal is not None:
             eval_after = {"cp": after_terminal["cp"], "mate": after_terminal["mate"]}
         else:
@@ -670,18 +712,14 @@ def create_app(
         game = _get(user, game_id)
         if req.ply == len(game.moves) and game.status == "en_curso":
             return game_state(game)  # nada que deshacer
-        was_finished = game.status == "terminada"
         try:
             take_back(game, req.ply)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         mark_help(game, "deshacer")
         _save(game)
-        if was_finished:
-            try:
-                ranking.forget("meaculpa", game.id)
-            except Exception:  # noqa: BLE001 - el ranking nunca rompe la partida
-                log.exception("No se pudo quitar la partida %s del ranking", game.id)
+        # Si ya había terminado sin ayuda, su resultado se queda en el ranking: reabrirla no lo borra (si no,
+        # bastaría con deshacer después de perder para quitarse las derrotas). Lo que pase después ya no cuenta.
         _record(user, "deshacer", ref=game.id)
         return game_state(game)
 

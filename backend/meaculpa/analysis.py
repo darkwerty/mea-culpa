@@ -422,26 +422,53 @@ def repeated_main_patterns(principal: MoveEval | None, current: list[str], histo
     return out
 
 
-# Frases que afirman un resultado. Se excluye «has perdido la dama», «ganaste material»...: eso no es el resultado.
-_THINGS = r"(?:la|el|un|una|unos|unas|los|las|material|tiempo|tiempos|calidad|pe[oó]n|pieza|piezas|ventaja)"
+# Frases que afirman un resultado. Se excluye «has perdido la dama», «ganaste material», «pierdes la iniciativa»,
+# «con ganas de atacar»...: eso no es el resultado. Cubre pasado, presente y perífrasis («acabaste perdiendo»),
+# sustantivos al principio de frase («Derrota por...», «Victoria pese a...») y «partida perdida o ganada».
+_THINGS = (
+    r"(?:la|el|lo|un|una|unos|unas|los|las|material|tiempo|tiempos|calidad|pe[oó]n|peones|pieza|piezas"
+    r"|ventaja|iniciativa)"
+)
+_NOT_RESULT = (
+    rf"(?!\s+(?:{_THINGS}|de vista|de\s+\w+ar|de\s+\w+er|de\s+\w+ir)\b)"  # «pierdes de vista», «ganas de atacar»
+)
+_START = r"(?:^|[.:;!?¡¿«\"]\s*)"  # principio del texto o de una frase
+_GAME = r"(?:la partida|el partido|esta partida)"
 _LOSS = re.compile(
-    rf"\b(?:has|habías|hayas) perdido(?!\s+{_THINGS}\b)|\b(?:has|habías) perdido la partida\b"
-    rf"|\bperdiste(?!\s+{_THINGS}\b)|\bperdiste la partida\b|\b(?:tu|otra|esta|una) derrota\b"
-    r"|\bte (?:han|ha) ganado la partida\b",
+    rf"\b(?:has|habías|hayas|habrías) perdido(?!\s+{_THINGS}\b)|\b(?:has|habías|hayas) perdido {_GAME}"
+    rf"|\bperdiste(?!\s+{_THINGS}\b)|\bperdiste {_GAME}|\bpierdes{_NOT_RESULT}|\bpierdes {_GAME}"
+    r"|\b(?:acabas|acabaste|has acabado|terminas|terminaste|has terminado|sales|saliste|has salido) perdiendo\b"
+    r"|\b(?:tu|otra|esta|una) derrota\b|" + _START + r"derrota\b|\bpartida perdida\b"
+    rf"|\bte (?:ha|han|había|habían) ganado(?!\s+{_THINGS}\b)|\bte (?:ha|han|había|habían) ganado {_GAME}"
+    rf"|\bte (?:ganó|ganaron|gana|ganan)(?!\s+{_THINGS}\b)|\bte (?:ganó|ganaron|gana|ganan) {_GAME}"
+    r"|\bte (?:ha |han |había |habían )?(?:ganado|ganó|ganaron|gana|ganan) "
+    r"(?:la ia|el rival|la máquina|el motor|el modelo|stockfish)\b"
+    r"|\b(?:has sido|fuiste|eres|quedas|quedaste) derrotad[oa]\b|\b(?:te han|te ha) derrotado\b"
+    r"|\bte (?:derrotó|derrotaron|venció|vencieron)\b|\bsucumbiste\b|\bcaíste derrotad[oa]\b",
     re.IGNORECASE,
 )
 _WIN = re.compile(
-    rf"\b(?:has|habías|hayas) ganado(?!\s+{_THINGS}\b)|\b(?:has|habías) ganado la partida\b"
-    rf"|\bganaste(?!\s+{_THINGS}\b)|\bganaste la partida\b|\b(?:tu|otra|esta) victoria\b"
-    r"|\bhas vencido\b|\bvenciste\b",
+    rf"\b(?:has|habías|hayas|habrías) ganado(?!\s+{_THINGS}\b)|\b(?:has|habías|hayas) ganado {_GAME}"
+    rf"|\bganaste(?!\s+{_THINGS}\b)|\bganaste {_GAME}|\bganas{_NOT_RESULT}|\bganas {_GAME}"
+    r"|\b(?:acabas|acabaste|has acabado|terminas|terminaste|has terminado|sales|saliste|has salido) ganando\b"
+    r"|\b(?:tu|otra|esta) victoria\b|" + _START + r"victoria\b|\bpartida ganada\b"
+    r"|\bhas vencido\b|\bvenciste\b|\bvences\b|\b(?:te llevas|te llevaste|te has llevado) (?:la partida|el punto)\b",
     re.IGNORECASE,
 )
 _DRAW = re.compile(
-    r"\b(?:has|habéis) (?:hecho|firmado) tablas\b|\bhiciste tablas\b|\bhas empatado\b|\bempataste\b"
-    r"|\b(?:acaba|acabó|termina|terminó|ha acabado|ha terminado) en tablas\b",
+    r"\b(?:has|habéis) (?:hecho|firmado|sacado) tablas\b|\bhiciste tablas\b|\bhaces tablas\b|\bsacas tablas\b"
+    r"|\bhas empatado\b|\bempataste\b|\bempatas\b|\bpartida empatada\b|\btus tablas\b|"
+    + _START
+    + r"(?:tablas|empate)\b"
+    r"|\b(?:acaba|acabó|termina|terminó|ha acabado|ha terminado|queda|quedó) en tablas\b",
     re.IGNORECASE,
 )
-_AGAIN = re.compile(r"\b(?:otra vez|de nuevo|una vez más|como siempre)\b", re.IGNORECASE)
+_AGAIN = re.compile(
+    r"\b(?:otra vez|de nuevo|una vez más|como siempre|vuelves a|volviste a|has vuelto a)\b", re.IGNORECASE
+)
+_AGAIN_START = re.compile(
+    _START + r"(?:otra vez|de nuevo|una vez más|como siempre|vuelves a|volviste a|has vuelto a)\b", re.IGNORECASE
+)
 _CLAIMS = {"derrota": _LOSS, "victoria": _WIN, "tablas": _DRAW}
 _WORDS = {"derrota": "has perdido", "victoria": "has ganado", "tablas": "has hecho tablas"}
 _FORBIDDEN_CLAIMS = {
@@ -469,12 +496,20 @@ def coherence_problems(diagnostico: dict[str, Any], result: str, again_allowed: 
             problems.append(f"{where} dice «{claim}» y el resultado es «{result}»")
     if not again_allowed and _AGAIN.search(diagnostico.get("titular", "")):
         problems.append("el titular dice «Otra vez» y el patrón principal no se ha repetido en partidas anteriores")
+    if not again_allowed and _AGAIN_START.search(diagnostico.get("consejo", "")):
+        problems.append(
+            "el consejo empieza por «Otra vez» y el patrón principal no se ha repetido en partidas anteriores"
+        )
     return problems
 
 
-def fallback_headline(result: str, pattern: str | None, again: bool) -> str:
-    """Titular generado sin LLM, coherente con el resultado."""
+def fallback_headline(result: str, pattern: str | None, again: bool, end_reason: str | None = None) -> str:
+    """Titular generado sin LLM, coherente con el resultado (y con el abandono, si te rendiste)."""
     cause = PATTERNS.get(pattern or "", "") if pattern and pattern != "otro" else ""
+    if result == "derrota" and end_reason == "abandono":
+        if not cause:
+            return "Te rendiste, pero el motor no encuentra un error grave tuyo"
+        return f"Te rendiste, y {'otra vez' if again else ''} tu error más caro fue {cause}".replace("  ", " ")
     if not cause:
         return {
             "victoria": "Has ganado, y el motor apenas encuentra errores tuyos",
@@ -491,7 +526,11 @@ def fallback_headline(result: str, pattern: str | None, again: bool) -> str:
 
 
 def _repair(
-    diagnostico: dict[str, Any], result: str, again_allowed: bool, principal: MoveEval | None
+    diagnostico: dict[str, Any],
+    result: str,
+    again_allowed: bool,
+    principal: MoveEval | None,
+    end_reason: str | None = None,
 ) -> dict[str, Any]:
     """Último recurso: sustituye los textos que contradicen el resultado por otros generados sin LLM."""
     fixed = dict(diagnostico)
@@ -501,8 +540,9 @@ def _repair(
         pattern = main["patron"] if main and main["patron"] != "otro" else principal.etiquetas[0]
     titular = fixed.get("titular", "")
     if contradictions(titular, result) or (not again_allowed and _AGAIN.search(titular)):
-        fixed["titular"] = fallback_headline(result, pattern, again_allowed)
-    if contradictions(fixed.get("consejo", ""), result):
+        fixed["titular"] = fallback_headline(result, pattern, again_allowed, end_reason)
+    consejo = fixed.get("consejo", "")
+    if contradictions(consejo, result) or (not again_allowed and _AGAIN_START.search(consejo)):
         fixed["consejo"] = (
             f"Antes de mover, mira qué amenaza el rival; en la jugada {principal.jugada_numero} "
             f"el motor prefería {principal.mejor_jugada}."
@@ -534,8 +574,10 @@ def diagnose(
     temperature: float | None = None,  # None = no se envía (valor por defecto del proveedor)
     settings: Settings | None = None,
     max_fix_retries: int = 1,
+    end_reason: str | None = None,
 ) -> DiagnosisResult:
     """`result_text`: resultado desde el jugador (victoria | tablas | derrota | en curso | desconocido).
+    `end_reason`: cómo terminó (motivo_fin de la partida: «abandono», «jaque mate», «triple repetición»...).
 
     Después del LLM se comprueba en código que el texto cuadra con el resultado (y que «Otra vez» tiene respaldo
     en el historial). Si no, se reintenta `max_fix_retries` veces y, si sigue mal, se corrige sin LLM.
@@ -546,7 +588,7 @@ def diagnose(
     facts = [e.to_fact() for e in errors]
     principal = max(errors, key=lambda e: e.caida_cp) if errors else None
     repeated = repeated_main_patterns(principal, analysis.patrones_partida, history)
-    messages = diagnosis_messages(pgn, result, analysis.user_color, facts, history, repeated)
+    messages = diagnosis_messages(pgn, result, analysis.user_color, facts, history, repeated, end_reason)
     res = provider.structured(messages, Diagnostico, temperature)
     tin, tout, latency, calls = res.input_tokens, res.output_tokens, res.latency_ms, 1
 
@@ -588,9 +630,10 @@ def diagnose(
             coherence = "reintento"
             break
     if problems:
-        diagnostico = _repair(diagnostico, result, again_allowed, principal)
+        diagnostico = _repair(diagnostico, result, again_allowed, principal, end_reason)
         coherence = "respaldo"
     grounding["resultado_jugador"] = result
+    grounding["fin"] = end_reason
     grounding["coherencia"] = coherence  # ok | reintento (lo corrigió el LLM) | respaldo (corregido sin LLM)
     grounding["contradicciones"] = problems
     return DiagnosisResult(diagnostico, grounding, **base())

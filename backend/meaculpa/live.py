@@ -208,14 +208,18 @@ class LiveEngine:
 
 
 def eval_payload(board: chess.Board, lines: list[Line]) -> dict[str, Any]:
-    """Respuesta de POST /eval a partir de la mejor línea."""
+    """Respuesta de POST /eval a partir de la mejor línea.
+
+    Solo la valoración: la mejor jugada y la línea del motor van siempre vacías. /eval se pide sobre la posición
+    actual de partidas que cuentan para el ranking, y devolver la jugada de Stockfish ahí sería una pista gratis que
+    no marca la partida «con ayuda». La mejor jugada solo sale por /hint, que sí la marca.
+    """
     best = lines[0]
-    move = best.pv[0] if best.pv and best.pv[0] in board.legal_moves else None
     return {
         **best.score(),
-        "best_uci": move.uci() if move else None,
-        "best_san": board.san(move) if move else None,
-        "pv_san": pv_san(board, best.pv) if move else [],
+        "best_uci": None,
+        "best_san": None,
+        "pv_san": [],
         "depth": best.depth,
         "resultado": None,
         "fin": None,

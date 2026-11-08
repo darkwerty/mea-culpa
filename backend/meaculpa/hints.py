@@ -32,6 +32,7 @@ PROMOTIONS = {chess.QUEEN: "dama", chess.ROOK: "torre", chess.BISHOP: "alfil", c
 CENTRE = {chess.D4, chess.E4, chess.D5, chess.E5}
 CLEAR_GAP_CP = 150  # diferencia con la segunda mejor jugada a partir de la cual se dice que es «claramente» mejor
 MAX_EXPLANATION = 700
+LOSING_CP = 200  # desde el jugador: a partir de -2 la jugada ya no «mejora la posición», sino que resiste
 _FORBIDDEN = str.maketrans({"·": ",", "—": ",", "–": "-"})
 _SPACES = re.compile(r"\s+")
 _COMMAS = re.compile(r"\s*,(?:\s*,)*\s+|\s+,(?:\s*,)*")  # no toca la coma decimal (0,3)
@@ -171,7 +172,14 @@ def motives(board: chess.Board, move: chess.Move, lines: list[Line], after: Line
         if not any(m.startswith("Fuerza el mate") for m in out):
             out.append(f"Con ella la valoración queda en {format_score(ref, side)}.")
     if all(m.startswith("Con ella la valoración") for m in out):
-        out.insert(0, "Mejora la posición sin perder material: es la que el motor prefiere entre todas.")
+        ref = after if after is not None else best
+        losing = ref is not None and ref.user_cp(side) <= -LOSING_CP  # también un mate en contra
+        out.insert(
+            0,
+            "Es la defensa que más resiste según el motor: las demás empeoran todavía más la posición."
+            if losing
+            else "Mejora la posición sin perder material: es la que el motor prefiere entre todas.",
+        )
     return out
 
 

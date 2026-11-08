@@ -87,6 +87,8 @@ Reglas estrictas:
    - victoria: "Has ganado, pero casi la regalas al dejar el rey en el centro".
    - tablas: "Tablas que podían haber sido victoria: dejaste pasar una ganancia clara".
    - derrota: "Has perdido por hacer un cambio desfavorable con el rey en el centro".
+   - derrota con <fin>abandono</fin>: "Te rendiste, y tu error más caro fue dejar piezas sin defender"
+     (si la evaluación no era mala cuando se rindió, dilo: "Te rendiste con la partida aún igualada").
    - en curso o desconocido: no hables del resultado, por ejemplo "Tu error más caro: dejar piezas sin defender".
    El 'consejo' y las explicaciones tampoco pueden contradecir el resultado.
 7. <patrones_repetidos> lista los patrones de la causa principal que ya salieron en partidas anteriores.
@@ -99,6 +101,18 @@ Patrones posibles: {json.dumps(PATTERNS, ensure_ascii=False)}
 """
 
 
+def end_sentence(result: str, end_reason: str | None) -> str:
+    """Frase sobre cómo terminó la partida (vacía si no se sabe)."""
+    if not end_reason or result in ("en curso", "desconocido"):
+        return ""
+    if end_reason == "abandono":
+        return (
+            "El jugador SE RINDIÓ: no hubo jaque mate. No digas que perdió por un error concreto como si el rival "
+            "le hubiera ganado en el tablero; di que se rindió y explica sus errores, si los hay."
+        )
+    return f"La partida terminó por {end_reason}."
+
+
 def diagnosis_messages(
     pgn: str,
     result_text: str,
@@ -106,14 +120,23 @@ def diagnosis_messages(
     facts: list[dict[str, Any]],
     history: dict[str, Any],
     repeated: list[str] | None = None,
+    end_reason: str | None = None,
 ) -> list[dict[str, str]]:
-    """`result_text`: resultado desde el jugador (victoria | tablas | derrota | en curso | desconocido)."""
+    """`result_text`: resultado desde el jugador (victoria | tablas | derrota | en curso | desconocido).
+
+    `end_reason`: cómo terminó (motivo_fin: «abandono», «jaque mate», «triple repetición»...), lo genera el servidor.
+    """
     result = result_text if result_text in PLAYER_RESULTS else "desconocido"
+    end = sanitize_untrusted(end_reason or "", 40)
+    end_lines = (
+        [f"<fin>{end}</fin>", end_sentence(result, end)] if end and result not in ("en curso", "desconocido") else []
+    )
     user = "\n".join(
         [
             f"El jugador lleva las {user_color}.",
             f"<resultado_jugador>{result}</resultado_jugador>",
             RESULT_SENTENCES[result],
+            *end_lines,
             "<partida_pgn>",
             sanitize_untrusted(pgn),
             "</partida_pgn>",

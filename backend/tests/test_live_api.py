@@ -108,7 +108,9 @@ def test_eval_normal_position_is_from_white(settings):
     client = _client(settings)
     body = client.post(f"{API}/eval", json={"fen": chess.STARTING_FEN}).json()
     assert set(body) >= {"cp", "mate", "best_uci", "best_san", "pv_san", "depth"}
-    assert body["cp"] == 25 and body["mate"] is None and body["best_uci"] == "a2a3" and body["best_san"] == "a3"
+    assert body["cp"] == 25 and body["mate"] is None
+    # La mejor jugada no sale por /eval (sería una pista gratis sin marcar la partida «con ayuda»).
+    assert body["best_uci"] is None and body["best_san"] is None and body["pv_san"] == []
     black = client.post(f"{API}/eval", json={"fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"})
     assert black.json()["cp"] == -25  # +0,25 para las negras = -25 desde las blancas
 
@@ -116,10 +118,10 @@ def test_eval_normal_position_is_from_white(settings):
 def test_eval_with_the_builtin_fallback_engine(settings):
     client = _client(settings, engine=LiveEngine(path="", size=1, fallback_depth=2))
     body = client.post(f"{API}/eval", json={"fen": SCHOLAR}).json()
-    assert body["mate"] == 1 and body["cp"] is None and body["best_san"] == "Qxf7#" and body["pv_san"] == ["Qxf7#"]
+    assert body["mate"] == 1 and body["cp"] is None and body["best_san"] is None and body["pv_san"] == []
     black_mates = "rnbqkbnr/pppp1ppp/8/4p3/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq - 0 2"
     body = client.post(f"{API}/eval", json={"fen": black_mates}).json()
-    assert body["mate"] == -1 and body["best_san"] == "Qh4#"
+    assert body["mate"] == -1 and body["best_uci"] is None
 
 
 def test_eval_engine_failure_is_503(settings):
@@ -298,21 +300,23 @@ def test_takeback_same_ply_is_a_no_op(settings):
     assert state["moves_uci"] == game["moves_uci"] and state["con_ayuda"] is False
 
 
-def test_takeback_reopens_a_finished_game_and_removes_it_from_the_ranking(settings):
+def test_takeback_reopens_a_finished_game_but_its_first_result_stays_in_the_ranking(settings):
     client = _client(settings)
     game = _play(client, _new_game(client), 2)
     client.post(f"{API}/games/{game['id']}/resign")
     rivals = client.get("/api/ranking/meaculpa").json()["rivales"]
-    assert rivals and rivals[0]["partidas"] == 1
+    assert rivals and rivals[0]["partidas"] == 1 and rivals[0]["derrotas"] == 1
     state = client.post(f"{API}/games/{game['id']}/takeback", json={"ply": 2}).json()
     assert state["status"] == "en_curso" and state["resultado_usuario"] is None and state["result"] == "*"
     assert state["legal_moves"] and state["con_ayuda"] is True
+    # Deshacer no borra la derrota (si no, bastaría con deshacer después de perder para quitársela).
     client.app.state.ranking._cache.clear()
-    assert client.get("/api/ranking/meaculpa").json()["rivales"] == []
-    # Y si vuelve a terminar, tampoco cuenta.
+    rivals = client.get("/api/ranking/meaculpa").json()["rivales"]
+    assert rivals[0]["partidas"] == 1 and rivals[0]["derrotas"] == 1
+    # Y lo que pase después ya no cuenta: sigue siendo una sola partida.
     client.post(f"{API}/games/{game['id']}/resign")
     client.app.state.ranking._cache.clear()
-    assert client.get("/api/ranking/meaculpa").json()["rivales"] == []
+    assert client.get("/api/ranking/meaculpa").json()["rivales"][0]["partidas"] == 1
 
 
 def test_takeback_of_a_finished_game_at_the_final_position(settings):
@@ -388,3 +392,123 @@ def test_fallback_explanation_and_clean_text():
 def test_terminal_payload():
     assert terminal_payload(chess.Board()) is None
     assert terminal_payload(chess.Board(FOOLS_MATE))["resultado"] == "0-1"
+
+
+# ------------------------------------------------------------------ pista y jugada a la vez
+class SideEffectEngine(FakeEngine):
+    """Como FakeEngine, pero mientras «piensa» otra petición guarda la partida (una pista o una jugada a la vez)."""
+
+    def __init__(self, effect) -> None:
+        super().__init__()
+        self.effect = effect
+
+    def analyse(self, board, *, time_s=0.2, depth=None, multipv=1):
+        if self.effect is not None:
+            effect, self.effect = self.effect, None
+            effect()
+        return super().analyse(board, time_s=time_s, depth=depth, multipv=multipv)
+
+
+def _hints_used(client, user="ana"):
+    limiter = client.app.state.limiter
+    found = limiter.objects.read(f"usage/{limiter._day()}/{owner_id(user)}")
+    return int(__import__("json").loads(found[0]).get("pistas", 0)) if found else 0
+
+
+def test_hint_keeps_a_help_mark_saved_meanwhile(settings):
+    from meaculpa.games import mark_help
+
+    engine = SideEffectEngine(None)
+    client = _client(settings, engine=engine)
+    game = _new_game(client)
+    store, owner = client.app.state.store, owner_id("ana")
+
+    def other_help():
+        record = store.get(owner, game["id"])
+        mark_help(record, "pistas")  # otra pista guardada mientras se calculaba esta
+        store.save(record)
+
+    engine.effect = other_help
+    res = client.post(f"{API}/games/{game['id']}/hint")
+    assert res.status_code == 200, res.text
+    assert res.json()["ayudas"] == {"pistas": 2, "deshacer": 0}
+    assert store.get(owner, game["id"]).ayudas == {"pistas": 2, "deshacer": 0}
+
+
+def test_hint_is_not_charged_if_you_moved_meanwhile(settings):
+    engine = SideEffectEngine(None)
+    client = _client(settings, engine=engine)
+    game = _new_game(client)
+    store, owner = client.app.state.store, owner_id("ana")
+
+    def moved():
+        record = store.get(owner, game["id"])
+        record.moves = ["e2e4", "e7e5"]  # la jugada (y la respuesta del rival) se guardó antes que la pista
+        store.save(record)
+
+    engine.effect = moved
+    res = client.post(f"{API}/games/{game['id']}/hint")
+    assert res.status_code == 409 and "pista" in res.json()["detail"]
+    assert _hints_used(client) == 0
+    state = client.get(f"{API}/games/{game['id']}").json()
+    assert state["moves_uci"] == ["e2e4", "e7e5"] and state["con_ayuda"] is False
+
+
+def test_move_survives_a_hint_saved_meanwhile(settings, monkeypatch):
+    """La jugada (con un rival lento) no se pierde si mientras tanto se ha guardado una pista."""
+    from meaculpa import main as main_module
+    from meaculpa.games import mark_help
+
+    client = _client(settings)
+    game = _new_game(client)
+    store, owner = client.app.state.store, owner_id("ana")
+    real = main_module.build_opponent
+
+    def slow_opponent(*args, **kwargs):
+        opp = real(*args, **kwargs)
+        choose = opp.choose_move
+
+        def choose_move(board):
+            record = store.get(owner, game["id"])
+            mark_help(record, "pistas")
+            store.save(record)
+            return choose(board)
+
+        opp.choose_move = choose_move
+        return opp
+
+    monkeypatch.setattr(main_module, "build_opponent", slow_opponent)
+    res = client.post(f"{API}/games/{game['id']}/move", json={"uci": "e2e4"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert len(body["moves_uci"]) == 2 and body["con_ayuda"] is True and body["ayudas"]["pistas"] == 1
+
+
+# ------------------------------------------------------------------ diagnóstico de una partida abandonada
+def test_resigned_game_tells_the_diagnosis_it_was_a_resignation(settings):
+    class Recording(MockProvider):
+        def __init__(self):
+            super().__init__(seed=5)
+            self.seen = []
+
+        def structured(self, messages, schema, temperature=None):
+            self.seen.append(messages)
+            return super().structured(messages, schema, temperature)
+
+    provider = Recording()
+    client = _client(settings, provider=provider)
+    game = _play(client, _new_game(client), 3)
+    client.post(f"{API}/games/{game['id']}/resign")
+    res = client.post(f"{API}/games/{game['id']}/analysis")
+    assert res.status_code == 200, res.text
+    prompt = provider.seen[-1][1]["content"]
+    assert "<fin>abandono</fin>" in prompt and "SE RINDIÓ" in prompt
+    assert res.json()["grounding"]["fin"] == "abandono"
+
+
+def test_motives_in_a_lost_position_do_not_say_it_improves():
+    board = chess.Board("4k3/8/8/8/8/8/q7/7K w - - 0 1")
+    move = chess.Move.from_uci("h1g1")
+    reasons = motives(board, move, [Line(cp=None, mate=-6, pv=[move])], Line(cp=None, mate=-5, pv=[]))
+    assert reasons[0].startswith("Es la defensa que más resiste")
+    assert not any("Mejora la posición" in r for r in reasons)
