@@ -1,0 +1,23 @@
+# Control de las anclas: ¿se mantienen las distancias nominales de UCI_Elo con 0,1 s por jugada?
+# sf1320 (como participante libre) contra sf1468 y sf1608. Gratis.
+nombre: control_anclas
+salida: eval/experimento/control_anclas
+semilla: 2028
+partidas_por_emparejamiento: 40
+modo: anclas
+tope_plies: 300
+presupuesto_usd: 0
+bootstrap: 1000
+paralelo: 4
+aperturas:
+  pgn: C:/Users/danie/Desktop/Dev/ajedrez-datos/qwerty0x-2026-10.pgn
+  usuario: qwerty0x
+  plies_min: 4
+  plies_max: 8
+  ambos_colores: true
+  max_eval_cp: 200
+anclas:
+  - {nombre: sf1468, tipo: stockfish, elo: 1468, uci_elo: 1468, tiempo: 0.1, hash: 16}
+  - {nombre: sf1608, tipo: stockfish, elo: 1608, uci_elo: 1608, tiempo: 0.1, hash: 16}
+participantes:
+  - {nombre: sf1320-libre, tipo: stockfish, uci_elo: 1320, tiempo: 0.1, hash: 16}

@@ -1,0 +1,27 @@
+# Paso 1 del experimento real: calibración gratuita de los motores contra Stockfish (UCI_Elo fijo).
+# Todos contra todos entre los participantes, y cada participante contra las tres anclas.
+nombre: calibracion
+salida: eval/experimento/calibracion
+semilla: 2026
+partidas_por_emparejamiento: 40          # 20 posiciones x 2 colores
+modo: todos
+tope_plies: 300
+presupuesto_usd: 0
+bootstrap: 1000
+paralelo: 5
+aperturas:
+  pgn: C:/Users/danie/Desktop/Dev/ajedrez-datos/qwerty0x-2026-10.pgn
+  usuario: qwerty0x
+  plies_min: 4
+  plies_max: 8
+  ambos_colores: true
+  max_eval_cp: 200
+anclas:
+  - {nombre: sf1320, tipo: stockfish, elo: 1320, uci_elo: 1320, tiempo: 0.1, hash: 16}
+  - {nombre: sf1468, tipo: stockfish, elo: 1468, uci_elo: 1468, tiempo: 0.1, hash: 16}
+  - {nombre: sf1608, tipo: stockfish, elo: 1608, uci_elo: 1608, tiempo: 0.1, hash: 16}
+participantes:
+  - {nombre: aleatorio, tipo: aleatorio}
+  - {nombre: codicioso, tipo: codicioso}
+  - {nombre: minimax1, tipo: minimax, profundidad: 1}
+  - {nombre: minimax2, tipo: minimax, profundidad: 2}

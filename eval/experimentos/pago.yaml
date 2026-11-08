@@ -1,0 +1,37 @@
+# Paso 2: modelos de pago en Foundry, en escalera desde el aleatorio. Tope DURO conjunto: 9,50 USD
+# (10 USD del trabajo completo menos 0,50 reservados para la carta del entrenador; gasto previo: 0 USD).
+# Elo de los peldaños: calibración (calibracion + calibracion_b, Stockfish fijo).
+nombre: pago
+salida: eval/experimento/pago
+semilla: 2026
+tope_plies: 300
+presupuesto_usd: 9.50
+bootstrap: 1000
+paralelo: 1
+aperturas:
+  pgn: C:/Users/danie/Desktop/Dev/ajedrez-datos/qwerty0x-2026-10.pgn
+  usuario: qwerty0x
+  plies_min: 4
+  plies_max: 8
+  ambos_colores: true
+  max_eval_cp: 200
+llm: {max_reintentos: 3, mostrar_legales: false, salida: auto}
+escalera: {bloque: 4, partidas: 30, subir_si: 0.65}
+peldanos: &peldanos
+  - {nombre: aleatorio, tipo: aleatorio, elo: 227}
+  - {nombre: codicioso, tipo: codicioso, elo: 636}
+  - {nombre: minimax1, tipo: minimax, profundidad: 1, elo: 1233}
+  - {nombre: sf1320, tipo: stockfish, elo: 1320, uci_elo: 1320, tiempo: 0.1, hash: 16}
+  - {nombre: minimax2, tipo: minimax, profundidad: 2, elo: 1405}
+  - {nombre: sf1468, tipo: stockfish, elo: 1468, uci_elo: 1468, tiempo: 0.1, hash: 16}
+  - {nombre: sf1608, tipo: stockfish, elo: 1608, uci_elo: 1608, tiempo: 0.1, hash: 16}
+anclas: *peldanos
+participantes:
+  - {nombre: luna-none, tipo: azure_openai, endpoint: "https://meaculpa-fc-7952.openai.azure.com/", deployment: gpt-6-luna,
+     auth: cli, reasoning_effort: none, max_tokens: 400, precio_entrada_1m: 0.10, precio_salida_1m: 0.50}
+  - {nombre: luna-high, tipo: azure_openai, endpoint: "https://meaculpa-fc-7952.openai.azure.com/", deployment: gpt-6-luna,
+     auth: cli, reasoning_effort: high, max_tokens: 16000, precio_entrada_1m: 0.10, precio_salida_1m: 0.50}
+  - {nombre: haiku-5-5, tipo: claude_foundry, recurso: meaculpa-swe-7952, deployment: claude-haiku-5-5,
+     auth: cli, effort: low, max_tokens: 4000, precio_entrada_1m: 0.10, precio_salida_1m: 0.50}
+  - {nombre: terra, tipo: azure_openai, endpoint: "https://meaculpa-fc-7952.openai.azure.com/", deployment: gpt-6.1-terra,
+     auth: cli, max_tokens: 16000, precio_entrada_1m: 1.00, precio_salida_1m: 5.00}

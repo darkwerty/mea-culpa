@@ -1,0 +1,32 @@
+# Paso 3: modelos locales de Ollama (gratis), en escalera desde el aleatorio. Sin razonamiento
+# (reasoning_effort: none): con razonamiento, qwen3.5:4b tarda ~465 s por jugada y gemma4 ~22 s,
+# incompatibles con ~20 partidas por modelo en ~2 horas. Elo de los peldaños: calibración conjunta.
+nombre: locales
+salida: eval/experimento/locales
+semilla: 2026
+tope_plies: 300
+presupuesto_usd: 0
+bootstrap: 1000
+paralelo: 1
+aperturas:
+  pgn: C:/Users/danie/Desktop/Dev/ajedrez-datos/qwerty0x-2026-10.pgn
+  usuario: qwerty0x
+  plies_min: 4
+  plies_max: 8
+  ambos_colores: true
+  max_eval_cp: 200
+llm: {max_reintentos: 3, mostrar_legales: false, salida: auto}
+escalera: {bloque: 4, partidas: 20, subir_si: 0.65, minutos_por_participante: 38}
+peldanos: &peldanos
+  - {nombre: aleatorio, tipo: aleatorio, elo: 227}
+  - {nombre: codicioso, tipo: codicioso, elo: 636}
+  - {nombre: minimax1, tipo: minimax, profundidad: 1, elo: 1233}
+  - {nombre: sf1320, tipo: stockfish, elo: 1320, uci_elo: 1320, tiempo: 0.1, hash: 16}
+  - {nombre: minimax2, tipo: minimax, profundidad: 2, elo: 1405}
+  - {nombre: sf1468, tipo: stockfish, elo: 1468, uci_elo: 1468, tiempo: 0.1, hash: 16}
+  - {nombre: sf1608, tipo: stockfish, elo: 1608, uci_elo: 1608, tiempo: 0.1, hash: 16}
+anclas: *peldanos
+participantes:
+  - {nombre: lfm3-1.7b, tipo: ollama, modelo: "lfm3:1.7b", salida_estructurada: auto, max_tokens: 300, reasoning_effort: none}
+  - {nombre: qwen3.5-4b, tipo: ollama, modelo: "qwen3.5:4b", salida_estructurada: auto, max_tokens: 300, reasoning_effort: none}
+  - {nombre: gemma4-e4b, tipo: ollama, modelo: "gemma4:e4b-it-qat", salida_estructurada: auto, max_tokens: 300, reasoning_effort: none}

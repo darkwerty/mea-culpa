@@ -1,0 +1,29 @@
+{
+  "gemma4-e4b": {
+    "partidas": 20,
+    "puntos": 0.0,
+    "elo": null,
+    "ic95": [
+      -1000.0,
+      -1000.0
+    ]
+  },
+  "lfm3-1.7b": {
+    "partidas": 20,
+    "puntos": 0.0,
+    "elo": null,
+    "ic95": [
+      -1000.0,
+      -1000.0
+    ]
+  },
+  "qwen3.5-4b": {
+    "partidas": 20,
+    "puntos": 0.0,
+    "elo": null,
+    "ic95": [
+      -1000.0,
+      -1000.0
+    ]
+  }
+}

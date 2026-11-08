@@ -22,3 +22,9 @@ infra/*.json
 .env
 *.log
 .DS_Store
+
+# Resultados en bruto de los experimentos de Elo (PGN y JSONL por partida); se versionan los informes
+eval/experimento/**/pgn/
+eval/experimento/**/*.pgn
+eval/experimento/**/*.jsonl
+eval/experimento/**/aperturas.json
