@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..config import ROOT_DIR
@@ -31,6 +32,30 @@ class GeoSettings:
     image_detail: str = "high"  # detail de la imagen en Azure OpenAI: low | high | auto
     models: tuple[str, ...] = ()  # vacío = todos los modelos con visión activos en Mea culpa
     default_model: str | None = None
+    # Street View (Google Maps Platform). Sin clave del servidor, todas las partidas son con fotos de Commons.
+    sv_key: str | None = field(default=None, repr=False)  # solo Street View Static API: nunca sale del servidor
+    sv_images: int = 4  # capturas de Street View Static que recibe la IA por ronda
+    sv_fov: int = 90  # campo de visión de cada captura (grados): 4 de 90 cubren la vuelta entera
+    sv_size: str = "640x640"  # máximo sin plan premium
+    sv_radius_m: int = 50_000  # radio de búsqueda de los metadatos alrededor de cada punto al azar
+    sv_pool_target: int = 40  # pano_id de reserva para que crear una partida sea instantáneo
+    sv_pool_low: int = 20  # por debajo de esto se rellena en segundo plano
+    sv_pool_background: bool = True  # False en tests: el relleno se hace en la misma llamada
+    quota_sv_games_per_day: int = 3  # partidas con Street View por persona y día (UTC); /admin la cambia
+    # Topes propios por debajo de los de Google (que son 300 al día y se reinician a medianoche de California):
+    sv_static_per_day: int = 280  # capturas de Street View Static al día; nunca más de SV_STATIC_HARD_CAP
+    maps_loads_per_day: int = 240  # cargas de mapa y panorámica estimadas al día (Google corta en 300)
+    # Para tests: sustituye a la petición HTTP a Google (url, params) -> (status, cuerpo, content-type).
+    http_get: Callable[[str, dict], tuple[int, bytes, str]] | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def sv_games_per_day(self) -> int:
+        """Partidas con Street View al día (todas las personas) que caben en el tope de capturas."""
+        return max(0, min(self.sv_static_per_day, SV_STATIC_HARD_CAP) // max(1, self.rounds * self.sv_images))
+
+
+# Techo duro de capturas de Street View Static al día, por debajo de la cuota de 300 que hay puesta en Google.
+SV_STATIC_HARD_CAP = 290
 
 
 def get_geo_settings() -> GeoSettings:
@@ -43,4 +68,13 @@ def get_geo_settings() -> GeoSettings:
         image_detail=(os.environ.get("GEO_IMAGE_DETAIL") or "high").strip().lower(),
         models=tuple(m.strip() for m in os.environ.get("GEO_MODELS", "").split(",") if m.strip()),
         default_model=(os.environ.get("GEO_DEFAULT_MODEL") or "").strip() or None,
+        sv_key=(os.environ.get("GEO_GOOGLE_MAPS_KEY") or "").strip() or None,
+        sv_images=max(1, min(6, _int("GEO_SV_IMAGES", 4))),
+        sv_fov=max(30, min(120, _int("GEO_SV_FOV", 90))),
+        sv_radius_m=_int("GEO_SV_RADIUS_M", 50_000),
+        sv_pool_target=_int("GEO_SV_POOL_TARGET", 40),
+        sv_pool_low=_int("GEO_SV_POOL_LOW", 20),
+        quota_sv_games_per_day=_int("GEO_QUOTA_SV_GAMES_PER_DAY", 3),
+        sv_static_per_day=min(SV_STATIC_HARD_CAP, _int("GEO_SV_STATIC_PER_DAY", 280)),
+        maps_loads_per_day=_int("GEO_MAPS_LOADS_PER_DAY", 240),
     )

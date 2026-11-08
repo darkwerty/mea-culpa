@@ -62,3 +62,60 @@ def geo_verifier(token: str) -> dict:
 
 def geo_auth(user: str = "ana") -> dict:
     return {"Authorization": f"Bearer {user}"}
+
+
+# ------------------------------------------------------------------ Street View falso (sin red)
+SV_KEY = "clave-servidor-de-prueba-XYZ"
+
+
+class FakeGoogle:
+    """Sustituye a las peticiones HTTP a Google: metadatos (por ubicación o por pano) y capturas de Street View Static.
+
+    Cada búsqueda por ubicación devuelve una panorámica en ese mismo punto. `user_every`: una de cada tantas es de un
+    usuario (copyright ajeno, pano largo) y se debe descartar. `fail`: Google no responde.
+    """
+
+    def __init__(self, user_every: int = 0, fail: bool = False) -> None:
+        self.user_every = user_every
+        self.fail = fail
+        self.panos: dict[str, tuple[float, float]] = {}
+        self.calls: list[tuple[str, dict]] = []
+        self.static = 0
+
+    def __call__(self, url: str, params: dict) -> tuple[int, bytes, str]:
+        assert params.get("key") == SV_KEY
+        self.calls.append((url, dict(params)))
+        if self.fail:
+            raise ConnectionError(f"sin red al pedir {url}?key={params['key']}")
+        if url.endswith("/metadata"):
+            if "pano" in params:
+                loc = self.panos.get(params["pano"])
+                if loc is None:
+                    return 200, json.dumps({"status": "ZERO_RESULTS"}).encode(), "application/json"
+                return 200, self._meta(params["pano"], *loc), "application/json"
+            assert params["source"] == "google" and int(params["radius"]) > 0
+            lat, lon = (float(x) for x in params["location"].split(","))
+            n = len(self.panos) + 1
+            if self.user_every and n % self.user_every == 0:
+                body = {"status": "OK", "copyright": "© Persona", "pano_id": "CAoSL" + "x" * 30, "location": {}}
+                body["location"] = {"lat": lat, "lng": lon}
+                self.panos[f"user{n}"] = (lat, lon)
+                return 200, json.dumps(body).encode(), "application/json"
+            pano = f"P{n:021d}"
+            self.panos[pano] = (round(lat, 6), round(lon, 6))
+            return 200, self._meta(pano, lat, lon), "application/json"
+        self.static += 1
+        assert params["pano"] in self.panos and params["return_error_code"] == "true"
+        return 200, b"\xff\xd8\xff\xe0captura-" + f"{params['pano']}-{params['heading']}".encode(), "image/jpeg"
+
+    @staticmethod
+    def _meta(pano: str, lat: float, lon: float) -> bytes:
+        return json.dumps(
+            {
+                "status": "OK",
+                "copyright": "© 2026 Google",
+                "date": "2024-05",
+                "pano_id": pano,
+                "location": {"lat": lat, "lng": lon},
+            }
+        ).encode()

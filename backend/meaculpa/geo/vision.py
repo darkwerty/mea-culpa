@@ -16,6 +16,9 @@ incluye la imagen:
 
 El modelo recibe SOLO la imagen (sin EXIF: las fotos se guardan sin metadatos) y unas instrucciones
 genéricas. Nunca el nombre del fichero, el título de Commons, el autor ni la solución.
+
+Con Street View recibe varias capturas de la misma panorámica (una lista de imágenes, mismas instrucciones y una
+frase que dice cuántas son). Las capturas solo existen en memoria durante la llamada: no se guardan en ningún sitio.
 """
 
 from __future__ import annotations
@@ -33,50 +36,80 @@ from ..llm.base import LLMResult
 from .schemas import GeoGuess
 
 SYSTEM_PROMPT = (
-    "Juegas a adivinar dónde se hizo una foto. Mira el paisaje, la vegetación, el clima, la arquitectura, "
+    "Juegas a adivinar dónde se hizo una foto o dónde está un punto de Street View. Mira el paisaje, la "
+    "vegetación, el clima, la arquitectura, "
     "las carreteras, el sentido de circulación y cualquier otra pista visual. Da tu mejor estimación aunque "
     "no estés seguro. Responde en español con: pais, region (región, provincia o zona), lat y lon en grados "
-    "decimales (WGS84), confianza entre 0 y 1, y razonamiento_breve (una o dos frases, máximo 300 caracteres, "
-    "con las pistas que has usado)."
+    "decimales (WGS84), confianza entre 0 y 1, razonamiento_breve (una frase, máximo 200 caracteres, con tu "
+    "conclusión) y pistas: una lista de 2 a 4 pistas cortas (máximo 120 caracteres cada una), cada una con algo que "
+    "se ve de verdad en la imagen (lado de circulación, idioma o alfabeto de los carteles, líneas de la carretera, "
+    "vegetación, arquitectura, clima, postes, matrículas) y hacia dónde te lleva. No inventes nada que no se vea: si "
+    "no hay pistas claras, pon una sola pista que lo diga. No uses los signos · — ni –."
 )
+# Tope de tokens de salida para este juego en los modelos que no razonan: la respuesta cabe de sobra y el coste no se
+# dispara. Los que razonan usan su propio max_tokens, porque el razonamiento cuenta dentro.
+GEO_MAX_OUTPUT_TOKENS = 600
 USER_PROMPT = "¿Dónde se hizo esta foto?"
+USER_PROMPT_SV = (
+    "Estas {n} imágenes son vistas de un mismo punto de Street View, mirando en direcciones distintas hasta dar "
+    "la vuelta completa. ¿Dónde está ese punto?"
+)
 JSON_PROMPT = (
     " Responde SOLO con un objeto JSON, sin texto antes ni después, con estas claves: "
-    '{"pais": "...", "region": "...", "lat": 0.0, "lon": 0.0, "confianza": 0.0, "razonamiento_breve": "..."}'
+    '{"pais": "...", "region": "...", "lat": 0.0, "lon": 0.0, "confianza": 0.0, "razonamiento_breve": "...", '
+    '"pistas": ["...", "..."]}'
 )
 _JSON_OBJECT = re.compile(r"\{.*\}", re.S)
 
 
-def _messages_text() -> tuple[str, str]:
-    return SYSTEM_PROMPT, USER_PROMPT
+Images = bytes | list[bytes]
 
 
-def locate(provider: Any, image: bytes, mime: str = "image/jpeg", detail: str = "high") -> LLMResult[GeoGuess]:
+def _as_list(images: Images) -> list[bytes]:
+    return [images] if isinstance(images, (bytes, bytearray)) else list(images)
+
+
+def _messages_text(n: int = 1) -> tuple[str, str]:
+    return SYSTEM_PROMPT, USER_PROMPT if n == 1 else USER_PROMPT_SV.format(n=n)
+
+
+def _geo_kwargs(provider: Any) -> dict[str, Any]:
+    """Los parámetros de generación del proveedor, con el tope de salida del juego si el modelo no razona."""
+    kw = provider.generation_kwargs(None)
+    if getattr(provider, "reasoning_effort", None) in (None, "none", "minimal"):
+        field = getattr(provider, "_max_tokens_field", "max_completion_tokens")
+        kw[field] = min(int(kw.get(field) or GEO_MAX_OUTPUT_TOKENS), GEO_MAX_OUTPUT_TOKENS)
+    return kw
+
+
+def _data_url(image: bytes, mime: str) -> str:
+    return f"data:{mime};base64,{base64.b64encode(image).decode()}"
+
+
+def locate(provider: Any, images: Images, mime: str = "image/jpeg", detail: str = "high") -> LLMResult[GeoGuess]:
+    """`images`: una foto (bytes) o varias capturas de la misma panorámica (lista de bytes)."""
     kind = getattr(provider, "kind", "")
     if hasattr(provider, "locate"):  # mock u otros proveedores nativos de imagen
-        return provider.locate(image, mime)
+        return provider.locate(images, mime)
     if kind in ("azure", "openai", "foundry"):
         if getattr(provider, "supports_structured", True):
-            return _locate_openai(provider, image, mime, detail)
-        return _locate_text(provider, image, mime)
+            return _locate_openai(provider, _as_list(images), mime, detail)
+        return _locate_text(provider, _as_list(images), mime)
     if kind == "claude":
-        return _locate_claude(provider, image, mime)
+        return _locate_claude(provider, _as_list(images), mime)
     raise TypeError(f"El proveedor {kind!r} no admite imágenes")
 
 
-def _locate_openai(provider: Any, image: bytes, mime: str, detail: str) -> LLMResult[GeoGuess]:
+def _locate_openai(provider: Any, images: list[bytes], mime: str, detail: str) -> LLMResult[GeoGuess]:
     from openai import ContentFilterFinishReasonError, LengthFinishReasonError
 
-    data_url = f"data:{mime};base64,{base64.b64encode(image).decode()}"
-    system, user = _messages_text()
+    system, user = _messages_text(len(images))
     messages = [
         {"role": "system", "content": system},
         {
             "role": "user",
-            "content": [
-                {"type": "text", "text": user},
-                {"type": "image_url", "image_url": {"url": data_url, "detail": detail}},
-            ],
+            "content": [{"type": "text", "text": user}]
+            + [{"type": "image_url", "image_url": {"url": _data_url(i, mime), "detail": detail}} for i in images],
         },
     ]
     t0 = time.perf_counter()
@@ -85,7 +118,7 @@ def _locate_openai(provider: Any, image: bytes, mime: str, detail: str) -> LLMRe
             model=provider.model,
             messages=messages,
             response_format=GeoGuess,
-            **provider.generation_kwargs(None),
+            **_geo_kwargs(provider),
         )
     except (ValidationError, LengthFinishReasonError, ContentFilterFinishReasonError, ValueError) as exc:
         elapsed = (time.perf_counter() - t0) * 1000
@@ -119,28 +152,26 @@ def parse_json_guess(text: str) -> tuple[GeoGuess | None, str | None]:
         data = json.loads(m.group(0))
         if isinstance(data, dict):
             data = {k: data[k] for k in GeoGuess.model_fields if k in data}  # sin claves de más
+            data.setdefault("pistas", [])
         return GeoGuess.model_validate(data), None
     except (ValidationError, ValueError, TypeError) as exc:
         return None, f"{type(exc).__name__}: {str(exc)[:200]}"
 
 
-def _locate_text(provider: Any, image: bytes, mime: str) -> LLMResult[GeoGuess]:
+def _locate_text(provider: Any, images: list[bytes], mime: str) -> LLMResult[GeoGuess]:
     """Modelos sin `response_format` con esquema: JSON pedido en las instrucciones y validado aquí."""
-    data_url = f"data:{mime};base64,{base64.b64encode(image).decode()}"
-    system, user = _messages_text()
+    system, user = _messages_text(len(images))
     messages = [
         {"role": "system", "content": system + JSON_PROMPT},
         {
             "role": "user",
-            "content": [
-                {"type": "text", "text": user},
-                {"type": "image_url", "image_url": {"url": data_url}},
-            ],
+            "content": [{"type": "text", "text": user}]
+            + [{"type": "image_url", "image_url": {"url": _data_url(i, mime)}} for i in images],
         },
     ]
     t0 = time.perf_counter()
     completion = provider._client.chat.completions.create(
-        model=provider.model, messages=messages, **provider.generation_kwargs(None)
+        model=provider.model, messages=messages, **_geo_kwargs(provider)
     )
     latency = (time.perf_counter() - t0) * 1000
     tin, tout = provider._usage(completion)
@@ -152,16 +183,19 @@ def _locate_text(provider: Any, image: bytes, mime: str) -> LLMResult[GeoGuess]:
     return LLMResult(parsed, raw, tin, tout, latency, completion.model or provider.name, error)
 
 
-def _locate_claude(provider: Any, image: bytes, mime: str) -> LLMResult[GeoGuess]:
+def _locate_claude(provider: Any, images: list[bytes], mime: str) -> LLMResult[GeoGuess]:
     from anthropic import transform_schema
 
-    system, user = _messages_text()
+    system, user = _messages_text(len(images))
     output_config: dict[str, Any] = {"format": {"type": "json_schema", "schema": transform_schema(GeoGuess)}}
     if getattr(provider, "effort", None):
         output_config["effort"] = provider.effort
     req: dict[str, Any] = {
         "model": provider.model,
-        "max_tokens": provider.max_tokens,
+        # Con pensamiento, el razonamiento cuenta dentro de max_tokens: se deja el del proveedor.
+        "max_tokens": provider.max_tokens
+        if getattr(provider, "thinking", None)
+        else min(provider.max_tokens, GEO_MAX_OUTPUT_TOKENS),
         "system": system,
         "messages": [
             {
@@ -169,10 +203,11 @@ def _locate_claude(provider: Any, image: bytes, mime: str) -> LLMResult[GeoGuess
                 "content": [
                     {
                         "type": "image",
-                        "source": {"type": "base64", "media_type": mime, "data": base64.b64encode(image).decode()},
-                    },
-                    {"type": "text", "text": user},
-                ],
+                        "source": {"type": "base64", "media_type": mime, "data": base64.b64encode(i).decode()},
+                    }
+                    for i in images
+                ]
+                + [{"type": "text", "text": user}],
             }
         ],
         "output_config": output_config,
@@ -226,9 +261,9 @@ class MockGeoProvider:
         self.price_input_per_m = price_input_per_m
         self.price_output_per_m = price_output_per_m
 
-    def locate(self, image: bytes, mime: str = "image/jpeg") -> LLMResult[GeoGuess]:
+    def locate(self, image: Images, mime: str = "image/jpeg") -> LLMResult[GeoGuess]:
         t0 = time.perf_counter()
-        h = hashlib.sha256(image).digest()
+        h = hashlib.sha256(b"".join(_as_list(image))).digest()
         pais, region, lat, lon = _MOCK_PLACES[h[0] % len(_MOCK_PLACES)]
         lat += (h[1] - 128) / 64.0
         lon += (h[2] - 128) / 64.0
@@ -239,6 +274,10 @@ class MockGeoProvider:
             lon=lon,
             confianza=round(0.2 + h[3] / 512.0, 2),
             razonamiento_breve="Soy el rival de pruebas: no miro la foto, elijo un sitio a partir de sus bytes.",
+            pistas=[
+                "No miro la imagen: no tengo pistas de verdad.",
+                f"Elijo {pais} a partir de los bytes de la imagen.",
+            ],
         )
         out = guess.model_dump_json()
         return LLMResult(guess, out, 800, len(out) // 4, (time.perf_counter() - t0) * 1000, self.name)

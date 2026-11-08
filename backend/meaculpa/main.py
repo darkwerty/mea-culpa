@@ -49,7 +49,7 @@ from .games import (
     new_game_id,
     take_back,
 )
-from .geo import GEO_PREFIX, create_geo_router
+from .geo import GEO_PREFIX, create_geo_router, geo_quota_defaults
 from .geo.config import GeoSettings, get_geo_settings
 from .geo.photos import PhotoSet
 from .hints import HintText, explain, fallback_explanation, motives
@@ -762,9 +762,7 @@ def create_app(
                 "llm_global": settings.global_llm_calls_per_day,
                 "ia_centimos_dia": settings.global_llm_cents_per_day,
                 "ia_centimos_usuario": settings.user_llm_cents_per_day,
-                "geo_partidas": geo_settings.quota_games_per_day,
-                "geo_ia": geo_settings.quota_llm_per_day,
-                "geo_global": geo_settings.global_llm_per_day,
+                **geo_quota_defaults(geo_settings),
             },
         )
     )

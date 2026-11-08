@@ -38,7 +38,7 @@ from .storage import ObjectStore
 
 log = logging.getLogger("meaculpa.ranking")
 
-DEMOS = ("geo", "meaculpa")
+DEMOS = ("geo", "geo-sv", "meaculpa")  # geo: partidas con fotos de Commons; geo-sv: con Street View
 TOP_PLAYERS = 20
 CACHE_SECONDS = 60.0
 RESULTS = ("victoria", "tablas", "derrota")
@@ -157,13 +157,14 @@ class RankingStore:
 
     def compute(self, cur: Any, demo: str) -> dict[str, Any]:
         top, lim = self.db.top(TOP_PLAYERS)
-        if demo == "geo":
+        if demo in ("geo", "geo-sv"):
             players = self._rows(
                 cur,
                 f"SELECT {top} j.nombre, p.puntos, p.puntos_ia, p.rival_nombre, p.ts "
                 "FROM ranking_partidas p JOIN ranking_jugadores j ON j.owner = p.owner "
-                "WHERE p.demo = 'geo' AND j.publico = 1 AND j.nombre IS NOT NULL "
+                "WHERE p.demo = ? AND j.publico = 1 AND j.nombre IS NOT NULL "
                 f"ORDER BY p.puntos DESC, p.ts ASC {lim}",
+                (demo,),
             )
             models = self._rows(
                 cur,
@@ -172,7 +173,8 @@ class RankingStore:
                 "SUM(CASE WHEN resultado = 'victoria' THEN 1 ELSE 0 END) AS gana_humano, "
                 "SUM(CASE WHEN resultado = 'derrota' THEN 1 ELSE 0 END) AS gana_ia, "
                 "SUM(CASE WHEN resultado = 'tablas' THEN 1 ELSE 0 END) AS empates "
-                "FROM ranking_partidas WHERE demo = 'geo' GROUP BY rival",
+                "FROM ranking_partidas WHERE demo = ? GROUP BY rival",
+                (demo,),
             )
             return {
                 "jugadores": [
@@ -288,7 +290,7 @@ class RankingStore:
             payload = json.loads(found[0])
         else:
             payload = {"demo": demo, "actualizado": None, "jugadores": []}
-            payload["modelos" if demo == "geo" else "rivales"] = []
+            payload["modelos" if demo.startswith("geo") else "rivales"] = []
         with self._lock:
             self._cache[demo] = (time.monotonic(), payload)
         return payload

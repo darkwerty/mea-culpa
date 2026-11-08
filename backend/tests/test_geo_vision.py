@@ -19,6 +19,7 @@ GOOD = {
     "lon": -73.0,
     "confianza": 0.6,
     "razonamiento_breve": "Torres",
+    "pistas": ["Montañas de granito", "Estepa patagónica"],
 }
 
 

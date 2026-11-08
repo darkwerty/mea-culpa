@@ -5,6 +5,6 @@ Subpaquete de la API de Mea culpa: usa su login (auth.User), su almacén (storag
 `create_geo_router(...)` bajo /api/geo.
 """
 
-from .router import GEO_PREFIX, create_geo_router
+from .router import GEO_PREFIX, create_geo_router, geo_quota_defaults
 
-__all__ = ["GEO_PREFIX", "create_geo_router"]
+__all__ = ["GEO_PREFIX", "create_geo_router", "geo_quota_defaults"]

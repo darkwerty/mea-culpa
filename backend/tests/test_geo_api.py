@@ -31,7 +31,9 @@ class SpyProvider:
         self.calls.append((args, kwargs))
         if not self.parsed:
             return LLMResult(None, "no es json", 1000, 50, 5.0, self.name, "ValidationError: x")
-        g = GeoGuess(pais="Nada", region="Golfo", lat=0, lon=0, confianza=0.1, razonamiento_breve="agua")
+        g = GeoGuess(
+            pais="Nada", region="Golfo", lat=0, lon=0, confianza=0.1, razonamiento_breve="agua", pistas=["Mar abierto"]
+        )
         return LLMResult(g, g.model_dump_json(), 1000, 50, 5.0, self.name)
 
 
@@ -192,7 +194,11 @@ def test_quota_llm_per_user(make_geo_client):
 def test_quota_games_and_global_fuse(make_geo_client):
     c = make_geo_client(models={"spy": SpyProvider()}, quota_games_per_day=1, global_llm_per_day=1)
     g = _new(c, "ana")
-    assert c.post("/api/geo/partidas", json={}, headers=auth("ana")).status_code == 429
+    # Con una partida a medias se retoma la misma; para empezar otra hay que abandonarla, y eso gasta cuota.
+    again = c.post("/api/geo/partidas", json={}, headers=auth("ana"))
+    assert again.status_code == 200 and again.json()["id"] == g["id"] and again.json()["reanudada"] is True
+    assert c.post("/api/geo/partidas", json={"abandonar": True}, headers=auth("ana")).status_code == 429
+    g = _new(c, "ana")  # la cuota no se ha gastado: sigue siendo la misma partida, sin abandonar
     assert c.post(f"/api/geo/partidas/{g['id']}/rondas/0", json={"lat": 1, "lon": 1}, headers=auth()).status_code == 200
     g2 = _new(c, "luis")
     r = c.post(f"/api/geo/partidas/{g2['id']}/rondas/0", json={"lat": 1, "lon": 1}, headers=auth("luis"))

@@ -13,6 +13,9 @@ from pydantic import BaseModel, ConfigDict, field_validator
 # Caracteres que no se muestran en la web (reglas de estilo de danielalonso.dev).
 _FORBIDDEN = str.maketrans({"·": ",", "—": ",", "–": "-", "•": ","})
 _SPACES = re.compile(r"\s+")
+MAX_CLUES = 4
+_BULLET = re.compile(r"^(?:[-*]|\d+[.)])\s*")  # viñetas o numeración que algunos modelos añaden
+MAX_CLUE = 140  # caracteres por pista
 
 
 def clean_text(value: str, limit: int) -> str:
@@ -29,6 +32,8 @@ class GeoGuess(BaseModel):
     lon: float
     confianza: float
     razonamiento_breve: str
+    # De 2 a 4 pistas visibles en la imagen y cómo llevan a la respuesta (o una sola si no hay pistas claras).
+    pistas: list[str]
 
     @field_validator("lat")
     @classmethod
@@ -66,6 +71,13 @@ class GeoGuess(BaseModel):
     @classmethod
     def _reason(cls, v: str) -> str:
         return clean_text(v, 400)
+
+    @field_validator("pistas")
+    @classmethod
+    def _clues(cls, v: list[str]) -> list[str]:
+        """Como mucho 4, cortas y sin los caracteres que la web no muestra. Vacía si el modelo no da ninguna."""
+        out = [_BULLET.sub("", clean_text(x, MAX_CLUE)) for x in v if isinstance(x, str)]
+        return [x for x in out if x][:MAX_CLUES]
 
 
 class GuessIn(BaseModel):

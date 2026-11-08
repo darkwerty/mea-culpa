@@ -34,6 +34,9 @@ QUOTA_LABELS = {
     "geo_partidas": "Fotos: partidas nuevas por persona y día",
     "geo_ia": "Fotos: fotos analizadas por la IA por persona y día",
     "geo_global": "Fotos: llamadas a la IA al día (todas las personas)",
+    "geo_sv_partidas": "Dónde está: partidas con Street View por persona y día",
+    "geo_sv_global": "Dónde está: partidas con Street View al día, todas las personas (tope de capturas)",
+    "geo_mapas": "Dónde está: cargas de mapa de Google al día (Google corta en 300)",
 }
 
 

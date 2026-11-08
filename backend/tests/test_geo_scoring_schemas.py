@@ -34,6 +34,7 @@ def _guess(**kw):
         "lon": -72.5,
         "confianza": 0.7,
         "razonamiento_breve": "Andes",
+        "pistas": ["Terrazas en ladera", "Clima seco de altura"],
     }
     return GeoGuess(**{**base, **kw})
 
@@ -71,3 +72,27 @@ def test_user_guess_wraps_longitude():
     assert GuessIn(lat=10, lon=-540).lon == -180
     with pytest.raises(ValidationError):
         GuessIn(lat=95, lon=0)
+
+
+def test_clues_are_cleaned_and_capped():
+    g = _guess(
+        pistas=[
+            "1. Conducen por la izquierda · carteles en tailandés",
+            "- Arrozales — clima tropical",
+            "",
+            "a",
+            "b",
+            "c",
+        ]
+    )
+    assert g.pistas[0] == "Conducen por la izquierda , carteles en tailandés"
+    assert all(c not in "".join(g.pistas) for c in "·—–")
+    assert len(g.pistas) == 4 and "" not in g.pistas
+    assert len(_guess(pistas=["x" * 500]).pistas[0]) <= 140
+
+
+def test_json_guess_without_clues_still_valid():
+    from meaculpa.geo.vision import parse_json_guess
+
+    g, err = parse_json_guess('{"pais":"x","region":"y","lat":1,"lon":2,"confianza":0.5,"razonamiento_breve":"z"}')
+    assert err is None and g.pistas == []
