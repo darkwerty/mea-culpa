@@ -7,7 +7,7 @@ import os
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import asdict
 from typing import Annotated, Any, Literal
 
@@ -26,7 +26,9 @@ from .analysis import (
     history_counts,
     make_analyzer,
     parse_pgn,
+    pgn_player_result,
     pgn_without_comments,
+    player_result,
 )
 from .auth import TokenVerifier, User, google_verifier, make_user_dependency
 from .config import Settings, get_settings
@@ -43,11 +45,23 @@ from .games import (
     build_opponent,
     finish_if_over,
     game_state,
+    mark_help,
     new_game_id,
+    take_back,
 )
 from .geo import GEO_PREFIX, create_geo_router
 from .geo.config import GeoSettings, get_geo_settings
 from .geo.photos import PhotoSet
+from .hints import HintText, explain, fallback_explanation, motives
+from .live import (
+    EngineBusy,
+    EngineFailure,
+    EvalRateLimiter,
+    LiveEngine,
+    eval_payload,
+    pv_san,
+    terminal_payload,
+)
 from .llm import LLMProvider, get_provider
 from .llm_player import MetricsStore
 from .models import CATALOG_BY_ID, MODEL_CATALOG, build_model_providers, model_catalog, model_label
@@ -88,6 +102,14 @@ class NewGameRequest(BaseModel):
 
 class MoveRequest(BaseModel):
     uci: str = Field(..., min_length=4, max_length=5)
+
+
+class EvalRequest(BaseModel):
+    fen: str = Field(..., min_length=10, max_length=120)
+
+
+class TakebackRequest(BaseModel):
+    ply: int = Field(..., ge=0, le=2000)
 
 
 class PgnAnalysisRequest(BaseModel):
@@ -155,6 +177,7 @@ def create_app(
     geo_photos: PhotoSet | None = None,
     database: Database | None = None,
     azure_costs: AzureCosts | None = None,
+    live_engine: LiveEngine | None = None,
 ) -> FastAPI:
     """Crea la API. Sin GOOGLE_CLIENT_ID no arranca: todas las rutas salvo salud y modelos exigen login.
 
@@ -162,6 +185,7 @@ def create_app(
     `geo_settings`, `geo_photos`: configuración y fotos de ¿Dónde está esta foto? (por defecto, entorno y data/fotos).
     `database`: usuarios, uso, mensajes y controles (por defecto, Azure SQL si está configurado o SQLite).
     `azure_costs`: gasto de Azure para /admin (por defecto, Cost Management con la identidad administrada).
+    `live_engine`: motor de la barra de evaluación y las pistas (por defecto, un pool de Stockfish o el alfa-beta).
     """
     settings = settings or get_settings()
     if not settings.google_client_id:
@@ -191,6 +215,8 @@ def create_app(
     chess_ids = {m for m in models if m not in CATALOG_BY_ID or CATALOG_BY_ID[m].ajedrez}
     metrics = MetricsStore(settings.data_dir / "llm_moves.jsonl")
     analysis_slots = threading.BoundedSemaphore(max(1, settings.max_concurrent_analyses))
+    live = live_engine or LiveEngine(size=settings.engine_pool_size, timeout_s=settings.engine_timeout_s)
+    eval_limiter = EvalRateLimiter(settings.eval_interval_ms / 1000, settings.eval_per_day)
     _setup_telemetry()
 
     # Sin /docs ni /openapi.json: no se publica el mapa de la API.
@@ -200,6 +226,7 @@ def create_app(
     async def lifespan(_app: FastAPI):
         yield
         web_stats.persist()  # al apagarse (escala a cero), las visitas en memoria pasan a Blob
+        live.close()  # sin procesos de Stockfish huérfanos
 
     app = FastAPI(
         title="Mea culpa", version="0.2.0", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
@@ -240,13 +267,20 @@ def create_app(
     app.state.limiter = limiter
     app.state.authenticate = make_user_dependency(verifier, client_id)
     app.state.data = data
+    app.state.live = live
+    app.state.eval_limiter = eval_limiter
 
     def _usable(model_id: str) -> bool:
         return model_id in chess_ids and data.model_enabled(model_id)
 
     def _rank(user: User, game: GameRecord) -> None:
-        """Partida terminada (jaque mate, tablas o abandono) al ranking, con el resultado que da el servidor."""
+        """Partida terminada (jaque mate, tablas o abandono) al ranking, con el resultado que da el servidor.
+
+        Las partidas con ayuda (pistas o jugadas deshechas) no cuentan: ni en el ranking ni en «Humanos contra IA».
+        """
         if game.status != "terminada" or game.resultado_usuario not in ("victoria", "tablas", "derrota"):
+            return
+        if game.con_ayuda:
             return
         rival, rival_name = chess_rival(game.opponent)
         try:
@@ -355,6 +389,7 @@ def create_app(
             "modelos": _catalog(),
             "stockfish": stockfish,
             "motor_analisis": "Stockfish" if stockfish else f"alfa-beta propio (profundidad {settings.analysis_depth})",
+            "motor_vivo": live.name,
             "limites_diarios": limiter.effective_limits(),
             "usuario": user.name,
         }
@@ -409,6 +444,7 @@ def create_app(
                 "jugadas": len(g.moves),
                 "patrones": g.patrones,
                 "titular": (g.diagnosis or {}).get("diagnostico", {}).get("titular") if g.diagnosis else None,
+                "con_ayuda": g.con_ayuda,
             }
             for g in store.recent(user.owner, limit=20)
         ]
@@ -473,11 +509,12 @@ def create_app(
             finally:
                 analyzer.close()
             history = history_counts(store.previous_patterns(user.owner, game.id), analysis.patrones_partida)
-            result_text = {"victoria": "victoria", "derrota": "derrota", "tablas": "tablas"}.get(
-                game.resultado_usuario or "", "en curso"
-            )
+            result_text = player_result(game.resultado_usuario)
             diag = diagnose(analysis, provider, game.pgn(), result_text, history, settings=settings)
             limiter.add_cost(diag.coste_usd, user.owner)
+            if diag.llamadas > 1:  # reintento por incoherencia con el resultado: cuenta en el fusible, sin cortar
+                with suppress(HTTPException):
+                    limiter.consume_llm_calls(diag.llamadas - 1)
         _record(
             user,
             "analisis",
@@ -517,8 +554,12 @@ def create_app(
                 analyzer.close()
             history = history_counts([], analysis.patrones_partida)
             pgn = pgn_without_comments(pgn_game)
-            diag = diagnose(analysis, provider, pgn, "desconocido", history, settings=settings)
+            result_text = pgn_player_result(pgn_game.headers.get("Result", "*"), color)
+            diag = diagnose(analysis, provider, pgn, result_text, history, settings=settings)
             limiter.add_cost(diag.coste_usd, user.owner)
+            if diag.llamadas > 1:
+                with suppress(HTTPException):
+                    limiter.consume_llm_calls(diag.llamadas - 1)
         _record(
             user,
             "analisis_pgn",
@@ -528,6 +569,121 @@ def create_app(
             usd=diag.coste_usd,
         )
         return {"analisis": analysis.to_dict(), **asdict(diag)}
+
+    # ------------------------------------------------ barra de evaluación, pistas y deshacer
+    @contextmanager
+    def _engine_errors() -> Iterator[None]:
+        try:
+            yield
+        except EngineBusy as exc:
+            raise HTTPException(503, "El motor está ocupado; vuelve a intentarlo en un momento") from exc
+        except EngineFailure as exc:
+            raise HTTPException(503, "El motor no ha respondido; vuelve a intentarlo") from exc
+
+    @app.post(API_PREFIX + "/eval")
+    def evaluate_position(req: EvalRequest, user: CurrentUser) -> dict[str, Any]:
+        """Barra de evaluación: solo motor (sin LLM ni base de datos), tiempo corto. Puntuación desde las blancas."""
+        try:
+            board = chess.Board(req.fen.strip())
+        except ValueError as exc:
+            raise HTTPException(422, "FEN no válido") from exc
+        if not board.is_valid():
+            raise HTTPException(422, "Esa posición no es legal")
+        why = eval_limiter.allow(user.owner)
+        if why == "rafaga":
+            raise HTTPException(429, "Demasiadas evaluaciones seguidas; espera un momento")
+        if why == "diario":
+            raise HTTPException(429, "Has llegado al límite diario de evaluaciones. Vuelve mañana.")
+        terminal = terminal_payload(board)
+        if terminal is not None:
+            return terminal
+        with _engine_errors():
+            lines = live.analyse(board, time_s=settings.eval_time_ms / 1000, depth=settings.eval_depth)
+        return eval_payload(board, lines)
+
+    @app.post(API_PREFIX + "/games/{game_id}/hint")
+    def hint(game_id: str, user: CurrentUser) -> dict[str, Any]:
+        """La mejor jugada para la posición actual, los motivos del motor y por qué (LLM o, si falla, sin LLM)."""
+        game = _get(user, game_id)
+        if game.status != "en_curso":
+            raise HTTPException(409, "La partida ya ha terminado")
+        board = game.board()
+        if board.turn != game.user_chess_color:
+            raise HTTPException(409, "No es tu turno")
+        limiter.consume(user.owner, "pistas")
+        with _engine_errors():
+            lines = live.analyse(board, time_s=settings.hint_time_ms / 1000, depth=settings.hint_depth, multipv=2)
+            best = lines[0].pv[0] if lines and lines[0].pv else None
+            if best is None or best not in board.legal_moves:
+                raise EngineFailure("sin jugada")
+            after = board.copy(stack=False)
+            after.push(best)
+            after_terminal = terminal_payload(after)
+            after_line = (
+                None
+                if after_terminal is not None
+                else live.analyse(after, time_s=settings.eval_time_ms / 1000, depth=settings.eval_depth)[0]
+            )
+        best_san = board.san(best)
+        reasons = motives(board, best, lines, after_line)
+        line = pv_san(board, lines[0].pv)
+        try:
+            limiter.check_budget(user.owner)
+            limiter.consume_llm_calls(1)
+        except HTTPException as exc:  # sin presupuesto o sin llamadas: explicación sin LLM
+            text = HintText(fallback_explanation(best_san, reasons), "motor", error=str(exc.detail))
+        else:
+            text = explain(provider, board, best_san, line, reasons, settings)
+            limiter.add_cost(text.coste_usd, user.owner)
+        _record(
+            user,
+            "pista",
+            ref=game.id,
+            modelo=text.modelo,
+            tokens_in=text.input_tokens,
+            tokens_out=text.output_tokens,
+            usd=text.coste_usd,
+        )
+        mark_help(game, "pistas")
+        _save(game)
+        if after_terminal is not None:
+            eval_after = {"cp": after_terminal["cp"], "mate": after_terminal["mate"]}
+        else:
+            assert after_line is not None
+            eval_after = after_line.score()
+        return {
+            "best_uci": best.uci(),
+            "best_san": best_san,
+            "pv_san": line,
+            "eval_antes": lines[0].score(),
+            "eval_despues": eval_after,
+            "motivos": reasons,
+            "explicacion": text.explicacion,
+            "fuente": text.fuente,
+            "con_ayuda": game.con_ayuda,
+            "ayudas": dict(game.ayudas),
+        }
+
+    @app.post(API_PREFIX + "/games/{game_id}/takeback")
+    def takeback(game_id: str, req: TakebackRequest, user: CurrentUser) -> dict[str, Any]:
+        """Vuelve a una posición anterior en la que mueve el jugador (reabre la partida si había terminado)."""
+        game = _get(user, game_id)
+        if req.ply == len(game.moves) and game.status == "en_curso":
+            return game_state(game)  # nada que deshacer
+        was_finished = game.status == "terminada"
+        try:
+            take_back(game, req.ply)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        mark_help(game, "deshacer")
+        _save(game)
+        if was_finished:
+            try:
+                ranking.forget("meaculpa", game.id)
+            except Exception:  # noqa: BLE001 - el ranking nunca rompe la partida
+                log.exception("No se pudo quitar la partida %s del ranking", game.id)
+        _record(user, "deshacer", ref=game.id)
+        return game_state(game)
 
     @app.get(API_PREFIX + "/metrics/llm")
     def llm_metrics(user: CurrentUser) -> dict[str, Any]:

@@ -11,7 +11,9 @@ segundo plano de db.py, así que el final de una partida no espera a la base de 
 
 Qué se valida: el resultado lo calcula el servidor con su propia partida (puntos del juego de fotos, resultado de
 python-chess o abandono). El cliente solo manda la casilla «Salir en el ranking con mi nombre». Cada partida
-cuenta una vez (la clave es demo:id). Quien desmarca la casilla deja de salir en las tablas de jugadores; sus
+cuenta una vez (la clave es demo:id). Las partidas de ajedrez con ayuda (pistas o jugadas deshechas) no se
+registran, y si una ya registrada se reabre deshaciendo jugadas, `forget()` la quita (necesita el permiso DELETE de
+infra/sql/004_ranking_borrar_permisos.sql). Quien desmarca la casilla deja de salir en las tablas de jugadores; sus
 partidas siguen contando, sin nombre, en las estadísticas de cada modelo.
 
 Migración a otro almacén: `export_rows()` devuelve todas las filas de las dos tablas como listas de dicts.
@@ -143,6 +145,24 @@ class RankingStore:
                 (row_id, ts, demo, user.owner, rival[:60], rival_name[:120], result, points, points_ai, row_id),
             )
             self._snapshot(cur, demo)
+
+        self.db.submit(job)
+
+    def forget(self, demo: str, game_id: str) -> None:
+        """Quita una partida del ranking (una partida terminada que se reabre con ayuda) y rehace la foto fija."""
+        if demo not in DEMOS:
+            raise ValueError(f"ranking: demo {demo!r} no válida")
+        row_id = f"{demo}:{game_id}"[:40]
+
+        def job(cur: Any) -> None:
+            # Sin el permiso DELETE (infra/sql/004) la sentencia falla sola: se registra y no rompe el lote de la cola.
+            try:
+                cur.execute("DELETE FROM ranking_partidas WHERE id = ?", (row_id,))
+            except Exception:  # noqa: BLE001
+                log.exception("No se pudo quitar %s del ranking (¿falta el permiso DELETE?)", row_id)
+                return
+            if cur.rowcount:
+                self._snapshot(cur, demo)
 
         self.db.submit(job)
 

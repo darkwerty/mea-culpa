@@ -59,6 +59,7 @@ class Settings:
     quota_moves_per_day: int = 1500
     quota_llm_moves_per_day: int = 200
     quota_analyses_per_day: int = 20
+    quota_hints_per_day: int = 30
     global_llm_calls_per_day: int = 3000
     # Fusible de gasto en IA de las dos demos, en céntimos de dólar al día (50 = 0,50 USD, unos 15 al mes).
     global_llm_cents_per_day: int = 50
@@ -88,6 +89,17 @@ class Settings:
     # Formulario de contacto: envíos por IP y día, y total de envíos al día.
     contact_per_ip_per_day: int = 5
     contact_per_day: int = 100
+    # Barra de evaluación en vivo (POST /eval): solo Stockfish, tiempo y profundidad cortos, sin base de datos.
+    eval_time_ms: int = 200
+    eval_depth: int = 14
+    eval_interval_ms: int = 150  # media mínima entre peticiones de una persona (con algo de ráfaga)
+    eval_per_day: int = 5000  # tope diario por persona (en memoria de cada réplica)
+    # Pista (POST /games/{id}/hint): algo más de motor que la barra.
+    hint_time_ms: int = 600
+    hint_depth: int = 18
+    # Procesos de Stockfish reutilizables para la barra y las pistas (el análisis de partidas abre el suyo).
+    engine_pool_size: int = 2
+    engine_timeout_s: float = 5.0
 
 
 def parse_admin_emails(raw: str | None) -> tuple[str, ...]:
@@ -121,6 +133,7 @@ def get_settings() -> Settings:
         quota_moves_per_day=_env_int("QUOTA_MOVES_PER_DAY", 1500),
         quota_llm_moves_per_day=_env_int("QUOTA_LLM_MOVES_PER_DAY", 200),
         quota_analyses_per_day=_env_int("QUOTA_ANALYSES_PER_DAY", 20),
+        quota_hints_per_day=_env_int("QUOTA_HINTS_PER_DAY", 30),
         global_llm_calls_per_day=_env_int("GLOBAL_LLM_CALLS_PER_DAY", 3000),
         global_llm_cents_per_day=_env_int("GLOBAL_LLM_CENTS_PER_DAY", 50),
         user_llm_cents_per_day=_env_int("USER_LLM_CENTS_PER_DAY", 20),
@@ -139,4 +152,12 @@ def get_settings() -> Settings:
         azure_budget_eur=float(os.environ.get("AZURE_BUDGET_EUR") or "40"),
         contact_per_ip_per_day=_env_int("CONTACT_PER_IP_PER_DAY", 5),
         contact_per_day=_env_int("CONTACT_PER_DAY", 100),
+        eval_time_ms=_env_int("EVAL_TIME_MS", 200),
+        eval_depth=_env_int("EVAL_DEPTH", 14),
+        eval_interval_ms=_env_int("EVAL_INTERVAL_MS", 150),
+        eval_per_day=_env_int("EVAL_PER_DAY", 5000),
+        hint_time_ms=_env_int("HINT_TIME_MS", 600),
+        hint_depth=_env_int("HINT_DEPTH", 18),
+        engine_pool_size=_env_int("ENGINE_POOL_SIZE", 2),
+        engine_timeout_s=float(os.environ.get("ENGINE_TIMEOUT_S") or "5"),
     )

@@ -16,7 +16,7 @@ import time
 import chess
 
 from ..prompts import extract_tag
-from ..schemas import PATTERNS, Diagnostico, ErrorExplicado, MoveProposal, PatronRecurrente
+from ..schemas import PATTERNS, Diagnostico, ErrorExplicado, MoveProposal, PatronRecurrente, Pista
 from .base import LLMResult, T
 
 _TEMPLATES = {
@@ -67,6 +67,8 @@ class MockProvider:
             parsed: object = self._move(messages, temperature)
         elif schema is Diagnostico:
             parsed = self._diagnosis(messages)
+        elif schema is Pista:
+            parsed = self._hint(messages)
         else:  # pragma: no cover - uso indebido
             raise TypeError(f"MockProvider no sabe responder con {schema.__name__}")
         prompt_text = "".join(m["content"] for m in messages)
@@ -136,15 +138,20 @@ class MockProvider:
             for p, n in sorted(history.get("recuentos", {}).items(), key=lambda kv: -kv[1])
             if n >= 2 and p in PATTERNS
         ]
-        repeated = {r.patron for r in recurrentes}
+        repeated = set(json.loads(extract_tag(user, "patrones_repetidos") or "[]"))
         if principal:
             main_pat = next((e.patron for e in errores if e.ply == principal["ply"]), "error_posicional")
-            lost = extract_tag(user, "resultado") == "derrota"
+            result = extract_tag(user, "resultado_jugador")
             again = main_pat in repeated
-            if lost:
-                titular = f"{'Otra vez has' if again else 'Has'} perdido por {PATTERNS[main_pat]}."
+            cause = PATTERNS[main_pat]
+            if result == "derrota":
+                titular = f"{'Otra vez has' if again else 'Has'} perdido por {cause}."
+            elif result == "victoria":
+                titular = f"Has ganado, pero {'otra vez caíste en' if again else 'casi la regalas por'} {cause}."
+            elif result == "tablas":
+                titular = f"Tablas que podían haber sido más: {'otra vez' if again else 'te costó'} {cause}."
             else:
-                titular = f"{'Otra vez el mismo fallo' if again else 'Tu error más caro'}: {PATTERNS[main_pat]}."
+                titular = f"{'Otra vez el mismo fallo' if again else 'Tu error más caro'}: {cause}."
             consejo = f"Antes de mover, pregúntate qué amenaza el rival; en la jugada {principal['jugada_numero']} tocaba {principal.get('mejor_jugada')}."
         else:
             titular = "Partida limpia: el motor no encuentra errores graves tuyos."
@@ -156,6 +163,14 @@ class MockProvider:
             patrones_recurrentes=recurrentes,
             consejo=consejo,
         )
+
+    # ----------------------------------------------------------------- pistas
+    def _hint(self, messages: list[dict[str, str]]) -> Pista:
+        user = messages[1]["content"]
+        best = extract_tag(user, "mejor_jugada") or "la jugada del motor"
+        reasons = json.loads(extract_tag(user, "motivos") or "[]")
+        body = " ".join(r for r in reasons[:2])
+        return Pista(explicacion=f"{best} es la mejor jugada aquí. {body}".strip())
 
 
 class ScriptedProvider:

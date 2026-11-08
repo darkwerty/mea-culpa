@@ -54,9 +54,15 @@ class PatronRecurrente(BaseModel):
 
 class Diagnostico(BaseModel):
     titular: str = Field(
-        description="Frase corta tipo 'Otra vez has perdido por no enrocar a tiempo', basada en los hechos"
+        description="Frase corta con la causa principal, coherente con el resultado del jugador y basada en los hechos"
     )
     error_principal_ply: int = Field(description="ply del error más grave según los hechos del motor")
     errores: list[ErrorExplicado]
     patrones_recurrentes: list[PatronRecurrente]
     consejo: str = Field(description="Un consejo práctico de una frase para la próxima partida")
+
+
+class Pista(BaseModel):
+    """Salida estructurada de una pista: la explicación de por qué la jugada del motor es la mejor."""
+
+    explicacion: str = Field(description="2 o 3 frases en español de España, solo con los motivos y la línea del motor")

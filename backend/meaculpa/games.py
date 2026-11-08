@@ -46,6 +46,9 @@ class GameRecord:
     diagnosis: dict[str, Any] | None = None
     patrones: list[str] = field(default_factory=list)
     owner: str = ""  # sha256 del `sub` de Google: nunca el email
+    # Pistas o jugadas deshechas: la partida se guarda igual, pero no cuenta para el ranking.
+    con_ayuda: bool = False
+    ayudas: dict[str, int] = field(default_factory=lambda: {"pistas": 0, "deshacer": 0})
     etag: str | None = field(default=None, repr=False, compare=False)  # no se guarda
 
     @property
@@ -197,4 +200,36 @@ def game_state(game: GameRecord) -> dict[str, Any]:
         "last_opponent_meta": game.last_opponent_meta,
         "has_diagnosis": game.diagnosis is not None,
         "pgn": game.pgn(),
+        "con_ayuda": game.con_ayuda,
+        "ayudas": {"pistas": int(game.ayudas.get("pistas", 0)), "deshacer": int(game.ayudas.get("deshacer", 0))},
     }
+
+
+def mark_help(game: GameRecord, kind: str) -> None:
+    """Pista ("pistas") o jugadas deshechas ("deshacer"): la partida pasa a ser «con ayuda»."""
+    game.con_ayuda = True
+    game.ayudas = {"pistas": 0, "deshacer": 0, **(game.ayudas or {})}
+    game.ayudas[kind] = int(game.ayudas.get(kind, 0)) + 1
+
+
+def take_back(game: GameRecord, ply: int) -> None:
+    """Deja la partida con `ply` medias jugadas y la reabre si había terminado. ValueError si no se puede."""
+    if ply < 0 or ply > len(game.moves):
+        raise ValueError(f"La partida tiene {len(game.moves)} medias jugadas: no se puede volver a la {ply}")
+    board = chess.Board()
+    for uci in game.moves[:ply]:
+        board.push_uci(uci)
+    if board.turn != game.user_chess_color:
+        raise ValueError("En esa posición le toca mover al rival: elige una posición en la que muevas tú")
+    if board.outcome(claim_draw=True) is not None:
+        raise ValueError("Esa posición ya es final de partida")
+    game.moves = game.moves[:ply]
+    game.status = "en_curso"
+    game.result = "*"
+    game.resultado_usuario = None
+    game.motivo_fin = None
+    game.last_opponent_meta = None
+    # El análisis y el diagnóstico eran de otra partida.
+    game.analysis = None
+    game.diagnosis = None
+    game.patrones = []

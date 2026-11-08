@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import io
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
@@ -23,7 +24,7 @@ from .config import Settings, get_settings
 from .engines import PIECE_VALUES, AlphaBetaSearcher, find_stockfish, is_mate_score, mate_in_moves
 from .engines.alphabeta import MATE
 from .llm.base import LLMProvider
-from .prompts import diagnosis_messages
+from .prompts import PLAYER_RESULTS, diagnosis_feedback, diagnosis_messages
 from .schemas import PATTERNS, Diagnostico
 
 CLIP_CP = 1000
@@ -380,6 +381,7 @@ class DiagnosisResult:
     latency_ms: float
     coste_usd: float
     error: str | None = None
+    llamadas: int = 1  # llamadas al LLM (2 si hubo que reintentar por incoherencia con el resultado)
 
 
 def history_counts(previous_patterns: list[list[str]], current: list[str]) -> dict[str, Any]:
@@ -392,6 +394,137 @@ def history_counts(previous_patterns: list[list[str]], current: list[str]) -> di
     return {"partidas": len(games), "recuentos": counts, "nota": "los recuentos incluyen esta partida"}
 
 
+def player_result(resultado_usuario: str | None) -> str:
+    """Resultado desde el jugador para el prompt: victoria | tablas | derrota | en curso."""
+    return resultado_usuario if resultado_usuario in ("victoria", "tablas", "derrota") else "en curso"
+
+
+def pgn_player_result(result_header: str, user_color: chess.Color) -> str:
+    """Resultado desde el jugador a partir de la cabecera Result de un PGN (ya validada)."""
+    if result_header == "1/2-1/2":
+        return "tablas"
+    if result_header in ("1-0", "0-1"):
+        won = (result_header == "1-0") == (user_color == chess.WHITE)
+        return "victoria" if won else "derrota"
+    return "desconocido"
+
+
+def repeated_main_patterns(principal: MoveEval | None, current: list[str], history: dict[str, Any]) -> list[str]:
+    """Patrones de la causa principal que ya salieron en partidas ANTERIORES (los recuentos incluyen esta)."""
+    if principal is None:
+        return []
+    counts = history.get("recuentos", {})
+    out = []
+    for tag in principal.etiquetas:
+        previous = int(counts.get(tag, 0)) - (1 if tag in current else 0)
+        if previous >= 1 and tag in PATTERNS and tag not in out:
+            out.append(tag)
+    return out
+
+
+# Frases que afirman un resultado. Se excluye «has perdido la dama», «ganaste material»...: eso no es el resultado.
+_THINGS = r"(?:la|el|un|una|unos|unas|los|las|material|tiempo|tiempos|calidad|pe[oó]n|pieza|piezas|ventaja)"
+_LOSS = re.compile(
+    rf"\b(?:has|habías|hayas) perdido(?!\s+{_THINGS}\b)|\b(?:has|habías) perdido la partida\b"
+    rf"|\bperdiste(?!\s+{_THINGS}\b)|\bperdiste la partida\b|\b(?:tu|otra|esta|una) derrota\b"
+    r"|\bte (?:han|ha) ganado la partida\b",
+    re.IGNORECASE,
+)
+_WIN = re.compile(
+    rf"\b(?:has|habías|hayas) ganado(?!\s+{_THINGS}\b)|\b(?:has|habías) ganado la partida\b"
+    rf"|\bganaste(?!\s+{_THINGS}\b)|\bganaste la partida\b|\b(?:tu|otra|esta) victoria\b"
+    r"|\bhas vencido\b|\bvenciste\b",
+    re.IGNORECASE,
+)
+_DRAW = re.compile(
+    r"\b(?:has|habéis) (?:hecho|firmado) tablas\b|\bhiciste tablas\b|\bhas empatado\b|\bempataste\b"
+    r"|\b(?:acaba|acabó|termina|terminó|ha acabado|ha terminado) en tablas\b",
+    re.IGNORECASE,
+)
+_AGAIN = re.compile(r"\b(?:otra vez|de nuevo|una vez más|como siempre)\b", re.IGNORECASE)
+_CLAIMS = {"derrota": _LOSS, "victoria": _WIN, "tablas": _DRAW}
+_WORDS = {"derrota": "has perdido", "victoria": "has ganado", "tablas": "has hecho tablas"}
+_FORBIDDEN_CLAIMS = {
+    "victoria": ("derrota", "tablas"),
+    "tablas": ("derrota", "victoria"),
+    "derrota": ("victoria", "tablas"),
+    "en curso": ("derrota", "victoria", "tablas"),
+    "desconocido": ("derrota", "victoria", "tablas"),
+}
+
+
+def contradictions(text: str, result: str) -> list[str]:
+    """Resultados que `text` afirma y que no cuadran con `result` (el del jugador)."""
+    return [_WORDS[c] for c in _FORBIDDEN_CLAIMS.get(result, ()) if _CLAIMS[c].search(text or "")]
+
+
+def coherence_problems(diagnostico: dict[str, Any], result: str, again_allowed: bool) -> list[str]:
+    """Qué contradice el resultado en el diagnóstico ya validado (titular, consejo, explicaciones)."""
+    problems = []
+    fields = [("el titular", diagnostico.get("titular", "")), ("el consejo", diagnostico.get("consejo", ""))]
+    fields += [(f"la explicación del ply {e['ply']}", e["explicacion"]) for e in diagnostico.get("errores", [])]
+    fields += [("un patrón recurrente", r["descripcion"]) for r in diagnostico.get("patrones_recurrentes", [])]
+    for where, text in fields:
+        for claim in contradictions(text, result):
+            problems.append(f"{where} dice «{claim}» y el resultado es «{result}»")
+    if not again_allowed and _AGAIN.search(diagnostico.get("titular", "")):
+        problems.append("el titular dice «Otra vez» y el patrón principal no se ha repetido en partidas anteriores")
+    return problems
+
+
+def fallback_headline(result: str, pattern: str | None, again: bool) -> str:
+    """Titular generado sin LLM, coherente con el resultado."""
+    cause = PATTERNS.get(pattern or "", "") if pattern and pattern != "otro" else ""
+    if not cause:
+        return {
+            "victoria": "Has ganado, y el motor apenas encuentra errores tuyos",
+            "tablas": "Tablas sin errores graves por tu parte",
+            "derrota": "Has perdido sin un error claro: el rival jugó mejor",
+        }.get(result, "Partida limpia: el motor no encuentra errores graves tuyos")
+    if result == "victoria":
+        return f"Has ganado, pero {'otra vez caíste en' if again else 'casi la regalas por'} {cause}"
+    if result == "tablas":
+        return f"Tablas que podían haber sido más: {'otra vez' if again else 'te costó'} {cause}"
+    if result == "derrota":
+        return f"{'Otra vez has' if again else 'Has'} perdido por {cause}"
+    return f"{'Otra vez el mismo fallo' if again else 'Tu error más caro'}: {cause}"
+
+
+def _repair(
+    diagnostico: dict[str, Any], result: str, again_allowed: bool, principal: MoveEval | None
+) -> dict[str, Any]:
+    """Último recurso: sustituye los textos que contradicen el resultado por otros generados sin LLM."""
+    fixed = dict(diagnostico)
+    pattern = None
+    if principal is not None:
+        main = next((e for e in fixed.get("errores", []) if e["ply"] == principal.ply), None)
+        pattern = main["patron"] if main and main["patron"] != "otro" else principal.etiquetas[0]
+    titular = fixed.get("titular", "")
+    if contradictions(titular, result) or (not again_allowed and _AGAIN.search(titular)):
+        fixed["titular"] = fallback_headline(result, pattern, again_allowed)
+    if contradictions(fixed.get("consejo", ""), result):
+        fixed["consejo"] = (
+            f"Antes de mover, mira qué amenaza el rival; en la jugada {principal.jugada_numero} "
+            f"el motor prefería {principal.mejor_jugada}."
+            if principal is not None and principal.mejor_jugada
+            else "Antes de mover, mira qué amenaza el rival."
+        )
+    errores = []
+    for e in fixed.get("errores", []):
+        if contradictions(e["explicacion"], result):
+            e = {
+                **e,
+                "explicacion": f"{e['jugada']} bajó la evaluación de {e['eval_antes']} a {e['eval_despues']}; "
+                f"el motor prefería {e['mejor_jugada'] or 'otra jugada'}.",
+            }
+        errores.append(e)
+    fixed["errores"] = errores
+    fixed["patrones_recurrentes"] = [
+        r for r in fixed.get("patrones_recurrentes", []) if not contradictions(r["descripcion"], result)
+    ]
+    return fixed
+
+
 def diagnose(
     analysis: GameAnalysis,
     provider: LLMProvider,
@@ -400,23 +533,67 @@ def diagnose(
     history: dict[str, Any],
     temperature: float | None = None,  # None = no se envía (valor por defecto del proveedor)
     settings: Settings | None = None,
+    max_fix_retries: int = 1,
 ) -> DiagnosisResult:
+    """`result_text`: resultado desde el jugador (victoria | tablas | derrota | en curso | desconocido).
+
+    Después del LLM se comprueba en código que el texto cuadra con el resultado (y que «Otra vez» tiene respaldo
+    en el historial). Si no, se reintenta `max_fix_retries` veces y, si sigue mal, se corrige sin LLM.
+    """
     settings = settings or get_settings()
+    result = result_text if result_text in PLAYER_RESULTS else "desconocido"
     errors = analysis.errors()
     facts = [e.to_fact() for e in errors]
-    messages = diagnosis_messages(pgn, result_text, analysis.user_color, facts, history)
+    principal = max(errors, key=lambda e: e.caida_cp) if errors else None
+    repeated = repeated_main_patterns(principal, analysis.patrones_partida, history)
+    messages = diagnosis_messages(pgn, result, analysis.user_color, facts, history, repeated)
     res = provider.structured(messages, Diagnostico, temperature)
-    cost = (res.input_tokens * settings.price_input_per_m + res.output_tokens * settings.price_output_per_m) / 1e6
-    base = {
-        "modelo": res.model,
-        "input_tokens": res.input_tokens,
-        "output_tokens": res.output_tokens,
-        "latency_ms": round(res.latency_ms, 1),
-        "coste_usd": round(cost, 6),
-    }
+    tin, tout, latency, calls = res.input_tokens, res.output_tokens, res.latency_ms, 1
+
+    def base() -> dict[str, Any]:
+        cost = (tin * settings.price_input_per_m + tout * settings.price_output_per_m) / 1e6
+        return {
+            "modelo": res.model,
+            "input_tokens": tin,
+            "output_tokens": tout,
+            "latency_ms": round(latency, 1),
+            "coste_usd": round(cost, 6),
+            "llamadas": calls,
+        }
+
     if res.parsed is None:
-        return DiagnosisResult(None, {}, error=res.error or "respuesta no válida", **base)
-    return DiagnosisResult(*ground(res.parsed, errors, history), **base)
+        return DiagnosisResult(None, {}, error=res.error or "respuesta no válida", **base())
+    diagnostico, grounding = ground(res.parsed, errors, history)
+    again_allowed = bool(repeated)
+    problems = coherence_problems(diagnostico, result, again_allowed)
+    coherence = "ok"
+    for _ in range(max_fix_retries if problems else 0):
+        assistant: dict[str, Any] = {"role": "assistant", "content": res.raw_text}
+        if res.native is not None:
+            assistant["native"] = res.native
+        retry_messages = [*messages, assistant, {"role": "user", "content": diagnosis_feedback(problems, result)}]
+        try:
+            res = provider.structured(retry_messages, Diagnostico, temperature)
+        except Exception:  # noqa: BLE001 - el reintento es opcional: se corrige sin LLM
+            break
+        tin, tout, latency = tin + res.input_tokens, tout + res.output_tokens, latency + res.latency_ms
+        calls += 1
+        if res.parsed is None:
+            continue
+        candidate, candidate_grounding = ground(res.parsed, errors, history)
+        candidate_problems = coherence_problems(candidate, result, again_allowed)
+        if len(candidate_problems) <= len(problems):
+            diagnostico, grounding, problems = candidate, candidate_grounding, candidate_problems
+        if not problems:
+            coherence = "reintento"
+            break
+    if problems:
+        diagnostico = _repair(diagnostico, result, again_allowed, principal)
+        coherence = "respaldo"
+    grounding["resultado_jugador"] = result
+    grounding["coherencia"] = coherence  # ok | reintento (lo corrigió el LLM) | respaldo (corregido sin LLM)
+    grounding["contradicciones"] = problems
+    return DiagnosisResult(diagnostico, grounding, **base())
 
 
 def ground(diag: Diagnostico, errors: list[MoveEval], history: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:

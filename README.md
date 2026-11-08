@@ -232,12 +232,45 @@ en Blob (`ranking/geo.json`, `ranking/meaculpa.json`). `GET /api/ranking/geo` y 
 públicos y solo leen esa foto fija (caché de 60 s), así que mirar el ranking nunca despierta la base de datos.
 `POST /api/ranking/preferencia` guarda la casilla «Salir en el ranking con mi nombre» (marcada por defecto; también va
 en el cuerpo de cada partida nueva como `ranking`). El nombre es el de pila del token de Google verificado; sin correo
-ni foto. `RankingStore.export_rows()` saca todas las filas para migrarlas a otro almacén.
+ni foto. `RankingStore.export_rows()` saca todas las filas para migrarlas a otro almacén. Las partidas «con ayuda»
+(pistas o jugadas deshechas) se guardan igual, pero no entran en el ranking ni en «Humanos contra IA»; si una partida
+ya terminada se reabre deshaciendo jugadas, se quita del ranking (necesita el permiso de
+`infra/sql/004_ranking_borrar_permisos.sql`).
+
+### Barra de evaluación, pistas y deshacer
+
+`backend/meaculpa/live.py` y `backend/meaculpa/hints.py`. Un pool pequeño de procesos de Stockfish (`ENGINE_POOL_SIZE`,
+2) que se reutilizan, con tiempo máximo por petición (`ENGINE_TIMEOUT_S`, 5): si uno no responde se cierra y se abre
+otro. Sin Stockfish se usa el alfa-beta propio.
+
+- `POST /api/meaculpa/eval` `{"fen"}`: solo motor (`EVAL_TIME_MS` 200, `EVAL_DEPTH` 14), sin LLM ni base de datos.
+  Devuelve `cp` o `mate` desde las blancas, `best_uci`, `best_san`, `pv_san` (hasta 6), `depth`, y `resultado` y `fin`
+  si la posición ya ha terminado (en el mate, `mate` = 0). Límite por persona en memoria: de media una cada
+  `EVAL_INTERVAL_MS` (150) y `EVAL_PER_DAY` (5000) al día. 422 si el FEN no vale, 429 si se pasa del límite, 503 si
+  el motor está ocupado o no responde.
+- `POST /api/meaculpa/games/{id}/hint`: mejor jugada de la posición actual (`HINT_TIME_MS` 600, `HINT_DEPTH` 18, dos
+  líneas), `eval_antes` y `eval_despues` (desde las blancas), `motivos` deducidos con python-chess y el motor, y una
+  `explicacion` del LLM de la demo hecha solo con esos motivos (`fuente: "llm"`); si el LLM falla o no hay
+  presupuesto, se monta con los motivos (`fuente: "motor"`). Cuota `pistas` (`QUOTA_HINTS_PER_DAY`, 30, ajustable en
+  /admin). 409 si no es tu turno o la partida ha terminado.
+- `POST /api/meaculpa/games/{id}/takeback` `{"ply"}`: deja la partida con `ply` medias jugadas (solo si ahí mueve el
+  jugador; reabre la partida si había terminado). 422 si el ply no vale.
+
+Las dos últimas marcan la partida como `con_ayuda` y suman en `ayudas` (`pistas`, `deshacer`).
+
+### Diagnóstico coherente con el resultado
+
+El prompt recibe `resultado_jugador` (victoria, tablas, derrota, en curso o desconocido) y la lista de patrones de la
+causa principal que ya salieron en partidas anteriores (`patrones_repetidos`, lo único que permite «Otra vez»).
+Después del LLM, `coherence_problems` busca en el titular, el consejo y las explicaciones frases que contradigan el
+resultado («has perdido» en una victoria...). Si las hay, se reintenta una vez con la corrección y, si sigue mal, se
+sustituye el texto por uno generado sin LLM. `grounding.coherencia` dice qué pasó (`ok`, `reintento` o `respaldo`).
 
 Otras variables: `GOOGLE_CLIENT_ID` (obligatoria), `CORS_ORIGINS`, `AZURE_STORAGE_ACCOUNT_URL` +
 `AZURE_STORAGE_CONTAINER`, `STOCKFISH_PATH`, `ANALYSIS_DEPTH` (3), `STOCKFISH_ANALYSIS_DEPTH` (14),
 `LLM_MAX_RETRIES` (3), `MEA_CULPA_DATA_DIR`, `QUOTA_GAMES_PER_DAY` (30), `QUOTA_MOVES_PER_DAY` (1500),
-`QUOTA_LLM_MOVES_PER_DAY` (200), `QUOTA_ANALYSES_PER_DAY` (20), `GLOBAL_LLM_CALLS_PER_DAY` (3000),
+`QUOTA_LLM_MOVES_PER_DAY` (200), `QUOTA_ANALYSES_PER_DAY` (20), `QUOTA_HINTS_PER_DAY` (30),
+`GLOBAL_LLM_CALLS_PER_DAY` (3000),
 `MAX_ANALYSIS_PLIES` (200), `MAX_CONCURRENT_ANALYSES` (1), `ANALYSIS_TIMEOUT_S` (90),
 `APPLICATIONINSIGHTS_CONNECTION_STRING` (+ paquete `azure-monitor-opentelemetry`).
 
