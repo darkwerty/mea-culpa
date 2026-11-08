@@ -15,12 +15,11 @@ import uuid
 from typing import Any
 
 from .db import Database, DatabaseUnavailable
+from .partidas import upsert_job
 
 log = logging.getLogger("meaculpa.datos")
 
 DEMOS = {"meaculpa": "Mea culpa (ajedrez)", "geo": "¿Dónde está esta foto?"}
-GAME_TYPES = ("partida", "geo_partida")
-MOVE_TYPES = ("jugada", "geo_ronda")
 MESSAGE_RETENTION_S = 365 * 86400  # 12 meses
 
 
@@ -280,33 +279,55 @@ class DataStore:
             row["eventos"][r["tipo"]] = int(r["n"])
         return sorted(out.values(), key=lambda r: (r["dia"], r["demo"]), reverse=True)
 
+    def save_game(self, row: dict[str, Any]) -> None:
+        """Fila de `partidas` (partidas.chess_row / geo_row), por la cola en segundo plano."""
+        self.db.submit(upsert_job(row))
+
     def recent_games(self, limit: int = 50) -> list[dict[str, Any]]:
         top, lim = self.db.top(limit)
         games = self.db.query(
-            f"SELECT {top} e.ref, e.ts, e.demo, e.modelo, e.owner, u.email, u.nombre FROM eventos e "
-            "LEFT JOIN usuarios u ON u.owner = e.owner WHERE e.tipo IN ('partida', 'geo_partida') "
-            f"ORDER BY e.ts DESC {lim}"
+            f"SELECT {top} p.id, p.demo, p.rival, p.rival_nombre, p.estado, p.resultado, p.motivo_fin, p.jugadas, "
+            "p.puntos, p.puntos_ia, p.inicio, p.duracion_s, u.email, u.nombre FROM partidas p "
+            f"LEFT JOIN usuarios u ON u.owner = p.owner ORDER BY p.inicio DESC {lim}"
         )
-        refs = [g["ref"] for g in games if g["ref"]]
+        refs = [g["id"].split(":", 1)[-1] for g in games]
         stats: dict[str, dict[str, Any]] = {}
         if refs:
             marks = ", ".join("?" for _ in refs)
             for r in self.db.query(
-                f"SELECT ref, tipo, COUNT(*) AS n, SUM(coste_usd) AS c, MAX(ts) AS ultimo FROM eventos "
-                f"WHERE ref IN ({marks}) GROUP BY ref, tipo",
+                "SELECT ref, SUM(coste_usd) AS c, SUM(CASE WHEN tipo = 'analisis' THEN 1 ELSE 0 END) AS a "
+                f"FROM eventos WHERE ref IN ({marks}) GROUP BY ref",
                 refs,
             ):
-                s = stats.setdefault(r["ref"], {"jugadas": 0, "coste_usd": 0.0, "ultimo": 0.0, "analisis": 0})
-                if r["tipo"] in MOVE_TYPES:
-                    s["jugadas"] += int(r["n"])
-                if r["tipo"] == "analisis":
-                    s["analisis"] += int(r["n"])
-                s["coste_usd"] += _num(r["c"])
-                s["ultimo"] = max(s["ultimo"], _num(r["ultimo"]))
-        return [
-            {**g, **stats.get(g["ref"], {"jugadas": 0, "coste_usd": 0.0, "ultimo": g["ts"], "analisis": 0})}
-            for g in games
+                stats[r["ref"]] = {"coste_usd": round(_num(r["c"]), 6), "analisis": int(r["a"] or 0)}
+        out = []
+        for g, ref in zip(games, refs, strict=True):
+            extra = stats.get(ref, {"coste_usd": 0.0, "analisis": 0})
+            out.append({**g, "ref": ref, "ts": g["inicio"], "modelo": g["rival"], **extra})
+        return out
+
+    def games_by_model(self, days: int = 30) -> list[dict[str, Any]]:
+        """Partidas por demo y rival (modelo o algoritmo) desde hace `days` días, con resultados del humano."""
+        since = day_of(self.clock() - (days - 1) * 86400)
+        rows = self.db.query(
+            "SELECT demo, rival, rival_nombre, COUNT(*) AS partidas, "
+            "SUM(CASE WHEN estado = 'terminada' THEN 1 ELSE 0 END) AS terminadas, "
+            "SUM(CASE WHEN resultado = 'victoria' THEN 1 ELSE 0 END) AS victorias, "
+            "SUM(CASE WHEN resultado = 'tablas' THEN 1 ELSE 0 END) AS tablas, "
+            "SUM(CASE WHEN resultado = 'derrota' THEN 1 ELSE 0 END) AS derrotas, "
+            "AVG(CASE WHEN estado = 'terminada' THEN duracion_s END) AS duracion_media "
+            "FROM partidas WHERE dia >= ? GROUP BY demo, rival, rival_nombre",
+            (since,),
+        )
+        out = [
+            {
+                **r,
+                **{k: int(r[k] or 0) for k in ("partidas", "terminadas", "victorias", "tablas", "derrotas")},
+                "duracion_media": round(_num(r["duracion_media"]), 1) if r["duracion_media"] is not None else None,
+            }
+            for r in rows
         ]
+        return sorted(out, key=lambda r: (r["demo"], -r["partidas"]))
 
     def ai_spend(self, days: int = 30) -> dict[str, Any]:
         since = day_of(self.clock() - (days - 1) * 86400)

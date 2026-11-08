@@ -27,6 +27,7 @@ from ..config import Settings
 from ..datos import DataStore
 from ..llm.base import LLMProvider, cost_usd
 from ..models import CATALOG_BY_ID, MODEL_CATALOG, build_model_providers, catalog_row, rival_label
+from ..partidas import geo_row
 from ..quota import UsageLimiter
 from ..ranking import RankingStore
 from ..storage import ObjectStore
@@ -121,6 +122,11 @@ def create_geo_router(
             store.save(game)
         except GeoConflictError as exc:
             raise HTTPException(409, "Esta ronda ya se ha respondido; recarga la partida") from exc
+        if data is not None:
+            try:
+                data.save_game(geo_row(game, time.time(), rival_label(game.modelo)))  # copia en SQL para /admin
+            except Exception:  # noqa: BLE001 - nunca rompe la partida
+                log.exception("No se pudo registrar la partida %s", game.id)
 
     def _state(game: GeoGame) -> dict[str, Any]:
         """Lo que ve el navegador: nada de la ronda en curso salvo la URL de su imagen."""

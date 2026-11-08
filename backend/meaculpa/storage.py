@@ -9,6 +9,7 @@ Las claves las construye siempre el servidor (hash del usuario + id hexadecimal)
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import re
 import threading
@@ -36,6 +37,9 @@ class ObjectStore(Protocol):
 
     def list(self, prefix: str) -> list[tuple[str, float]]:
         """(clave, última modificación en epoch) de las claves que empiezan por `prefix`."""
+
+    def delete(self, key: str) -> None:
+        """Borra la clave (sin error si no existe)."""
 
 
 class FileObjectStore:
@@ -83,6 +87,10 @@ class FileObjectStore:
                 out.append((path.relative_to(self.root).as_posix(), path.stat().st_mtime))
         return out
 
+    def delete(self, key: str) -> None:
+        with self._lock:
+            self._path(key).unlink(missing_ok=True)
+
 
 class AzureBlobObjectStore:
     def __init__(self, account_url: str, container: str, container_client=None) -> None:
@@ -122,6 +130,12 @@ class AzureBlobObjectStore:
             (b.name, b.last_modified.timestamp())
             for b in self._container.list_blobs(name_starts_with=_check_key(prefix.rstrip("/")) + "/")
         ]
+
+    def delete(self, key: str) -> None:
+        from azure.core.exceptions import ResourceNotFoundError
+
+        with contextlib.suppress(ResourceNotFoundError):
+            self._container.delete_blob(_check_key(key))
 
 
 def make_object_store(settings: Settings) -> ObjectStore:

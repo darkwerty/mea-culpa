@@ -318,6 +318,11 @@ export STOCKFISH_PATH="C:/.../stockfish-windows-x86-64-universal.exe"   # o 'sto
   conocido). Solo autenticación de Microsoft Entra (sin usuarios ni contraseñas SQL); la API entra con su identidad
   administrada (`meaculpa-api-id`, solo SELECT/INSERT/UPDATE/DELETE en sus tablas, ver `infra/sql/identidad_api.sql`).
   Firewall: solo «permitir servicios de Azure». Migraciones versionadas en `backend/meaculpa/migrations/`.
+  Desde la migración 003 guarda también **cada partida** de las dos demos (`partidas`: rival, resultado, PGN o
+  puntos por ronda, duración; las anteriores se copiaron de Blob con `backend/scripts/migrar_partidas.py`) y las
+  **visitas de la web sin cookies** (`visitas`, `POST /api/stats/visita`: ruta, dominio de procedencia, país por zona
+  horaria, dispositivo y un hash diario con sal en memoria; 12 meses). Las visitas no despiertan la base de datos:
+  esperan en Blob (`stats/pendiente/`) hasta que está despierta por otra cosa o, como mucho, una vez al día.
 - **Presupuesto mensual** (desde 2026-11-01) con alertas al 50 % y 90 % (real) y al 100 % (previsto) a
   admin@example.com.
 

@@ -18,6 +18,7 @@ from .auth import User
 from .costes_azure import AzureCosts
 from .datos import DEMOS, DataStore
 from .db import DatabaseUnavailable
+from .estadisticas import WebStats
 from .llm.base import LLMProvider
 from .models import MODEL_CATALOG
 
@@ -60,6 +61,7 @@ def create_admin_router(
     costs: AzureCosts,
     models: dict[str, LLMProvider],
     quota_defaults: dict[str, int],
+    web_stats: WebStats | None = None,
 ) -> APIRouter:
     allowed = {e.strip().lower() for e in admin_emails if e.strip()}
 
@@ -141,6 +143,18 @@ def create_admin_router(
     def games(limite: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
         with database():
             return {"partidas": data.recent_games(limite)}
+
+    @router.get("/partidas-por-modelo")
+    def games_by_model(dias: int = Query(30, ge=1, le=365)) -> dict[str, Any]:
+        with database():
+            return {"partidas": data.games_by_model(dias), "demos": DEMOS}
+
+    @router.get("/web")
+    def web(dias: int = Query(30, ge=1, le=365)) -> dict[str, Any]:
+        if web_stats is None:
+            raise HTTPException(404, "Sin estadísticas de la web")
+        with database():
+            return web_stats.report(dias)
 
     @router.get("/gasto-ia")
     def ai_spend(dias: int = Query(30, ge=1, le=365)) -> dict[str, Any]:

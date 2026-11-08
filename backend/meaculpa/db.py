@@ -96,6 +96,7 @@ class Database:
         self._lock = threading.Lock()  # SQLite: una sola conexión compartida
         self._shared: Any = None
         self._down_until = 0.0
+        self.last_ok = -1e9  # time.monotonic() del último acceso correcto: si es reciente, está despierta
         self._queue: queue.Queue[Job] = queue.Queue(maxsize=10_000)
         self._writer: threading.Thread | None = None
 
@@ -134,6 +135,7 @@ class Database:
                 conn.rollback()
                 raise
             conn.commit()
+            self.last_ok = time.monotonic()
             return result
 
     def run(self, job: Job, *, retries: int = 0, wait: float = 10.0) -> Any:
@@ -213,6 +215,11 @@ class Database:
                         log.info("Base de datos ocupada (intento %d): %s", attempt + 1, exc)
                         time.sleep(delay)
 
+    def recently_awake(self, seconds: float = 300.0) -> bool:
+        """Si ha habido un acceso correcto hace poco: la base de datos serverless está despierta y escribir no
+        la despierta (ni gasta más límite gratuito del que ya se está gastando)."""
+        return time.monotonic() - self.last_ok < seconds
+
     def flush(self, timeout: float = 10.0) -> None:
         """Espera a que se vacíe la cola (para scripts y tests)."""
         end = time.monotonic() + timeout
@@ -249,6 +256,8 @@ class Database:
             if version in done:
                 continue
             statements = split_statements(path.read_text(encoding="utf-8"))
+            if self.dialect == "sqlite":  # SQLite no entiende NVARCHAR(MAX); TEXT no tiene límite
+                statements = [s.replace("NVARCHAR(MAX)", "TEXT") for s in statements]
 
             def job(cur: Any, statements=statements, version=version, name=path.name) -> None:
                 for stmt in statements:

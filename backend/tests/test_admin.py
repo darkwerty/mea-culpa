@@ -133,7 +133,8 @@ def test_usage_users_and_ai_spend_are_recorded(api):
     usage = api.get("/api/admin/uso", headers=ADMIN_H).json()["por_dia"]
     assert usage[0]["demo"] == "meaculpa" and usage[0]["eventos"]["partida"] == 1
     games = api.get("/api/admin/partidas", headers=ADMIN_H).json()["partidas"]
-    assert games[0]["ref"] == gid and games[0]["jugadas"] == 1 and games[0]["email"] == "ana@example.com"
+    assert games[0]["ref"] == gid and games[0]["jugadas"] == 2 and games[0]["email"] == "ana@example.com"
+    assert games[0]["estado"] == "en_curso" and games[0]["demo"] == "meaculpa"
     spend = api.get("/api/admin/gasto-ia", headers=ADMIN_H).json()
     assert spend["por_modelo"] and spend["por_modelo"][0]["llamadas"] >= 1
 
@@ -291,3 +292,83 @@ def test_geo_round_is_recorded_and_model_toggle(make_geo_client):
     assert client.post("/api/geo/partidas", json={"modelo": "spy"}, headers=geo_auth("ana")).status_code == 400
     r = client.post(f"/api/geo/partidas/{game['id']}/rondas/1", json={"lat": 1, "lon": 1}, headers=geo_auth("ana"))
     assert r.status_code == 503
+
+
+def test_chess_game_is_stored_in_sql_with_pgn_and_result(api):
+    gid = api.post("/api/meaculpa/games", json={"opponent": {"type": "random"}}, headers=ANA_H).json()["id"]
+    state = api.get(f"/api/meaculpa/games/{gid}", headers=ANA_H).json()
+    api.post(f"/api/meaculpa/games/{gid}/move", json={"uci": state["legal_moves"][0]}, headers=ANA_H)
+    api.post(f"/api/meaculpa/games/{gid}/resign", headers=ANA_H)
+    db = api.app.state.data.db
+    row = db.query("SELECT * FROM partidas WHERE id = ?", (f"meaculpa:{gid}",))[0]
+    assert row["estado"] == "terminada" and row["resultado"] == "derrota" and row["motivo_fin"] == "abandono"
+    assert row["owner"] == owner_id("ana") and row["rival"] == "random" and row["jugadas"] == 2
+    assert "1." in row["pgn"] and row["fin"] is not None and row["duracion_s"] >= 0
+    by_model = api.get("/api/admin/partidas-por-modelo", headers=ADMIN_H).json()["partidas"]
+    assert by_model[0]["rival"] == "random" and by_model[0]["derrotas"] == 1
+
+
+def _beacon(api, ruta, **kw):
+    headers = {"User-Agent": kw.pop("ua", "Mozilla/5.0 (Windows NT 10.0) Firefox/140.0")}
+    headers.update(kw.pop("headers", {}))
+    return api.post("/api/stats/visita", json={"ruta": ruta, **kw}, headers=headers)
+
+
+def test_web_stats_without_cookies(api):
+    iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148"
+    assert _beacon(api, "/", ref="https://www.google.com/search?q=x", tz="Europe/Madrid").status_code == 204
+    _beacon(api, "/proyectos/", ref="https://danielalonso.dev/", tz="America/Mexico_City", ua=iphone)
+    _beacon(api, "/proyectos?utm=1", headers={"X-Forwarded-For": "203.0.113.9"})
+    _beacon(api, "/admin")  # no se cuenta
+    _beacon(api, "/", ua="Googlebot/2.1")  # bots fuera
+    _beacon(api, "javascript:alert(1)")  # ruta no válida
+    res = _beacon(api, "/x")
+    assert res.status_code == 204 and "set-cookie" not in res.headers
+    assert api.post("/api/stats/visita", content=b"no es json").status_code == 204
+    web = api.get("/api/admin/web", headers=ADMIN_H).json()
+    assert web["total"] == 4
+    pages = {p["valor"]: p["visitas"] for p in web["paginas"]}
+    assert pages == {"/": 1, "/proyectos": 2, "/x": 1}
+    assert web["referers"] == [{"valor": "google.com", "visitas": 1}]
+    assert {p["valor"] for p in web["paises"]} == {"ES", "MX"}
+    assert {d["valor"] for d in web["dispositivos"]} == {"ordenador", "movil"}
+    assert web["por_dia"][0]["visitas"] == 4 and web["por_dia"][0]["visitantes"] == 3
+    rows = api.app.state.data.db.query("SELECT * FROM visitas")
+    assert all(len(r["visitante"]) == 16 for r in rows)
+    assert not any("203.0.113" in str(v) for r in rows for v in r.values())
+
+
+def test_web_stats_rate_limit(api):
+    stats = api.app.state.web_stats
+    stats.PER_VISITOR_LIMIT = 3
+    for _ in range(6):
+        _beacon(api, "/")
+    stats.persist()
+    stats.flush()
+    assert api.app.state.data.db.query("SELECT COUNT(*) AS n FROM visitas")[0]["n"] == 3
+
+
+def test_web_stats_do_not_wake_a_paused_database(tmp_path):
+    """En Azure SQL las visitas esperan en Blob hasta que la base de datos está despierta por otra cosa."""
+    from types import SimpleNamespace
+
+    from meaculpa.estadisticas import PENDING_PREFIX, WebStats
+    from meaculpa.storage import FileObjectStore
+
+    calls = []
+
+    class PausedDb:
+        dialect = "mssql"
+
+        def recently_awake(self):
+            return False
+
+        def run(self, job):
+            calls.append(job)
+
+    objects = FileObjectStore(tmp_path)
+    stats = WebStats(PausedDb(), objects)
+    req = SimpleNamespace(headers={"user-agent": "Mozilla/5.0 Firefox"}, client=SimpleNamespace(host="1.2.3.4"))
+    assert stats.hit(req, {"ruta": "/"})
+    stats.persist_and_maybe_flush()
+    assert calls == [] and len(objects.list(PENDING_PREFIX)) == 1

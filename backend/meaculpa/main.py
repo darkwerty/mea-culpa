@@ -7,7 +7,7 @@ import os
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict
 from typing import Annotated, Any, Literal
 
@@ -35,6 +35,7 @@ from .costes_azure import AzureCosts, http_fetcher
 from .datos import DataStore
 from .db import Database, mssql_connector
 from .engines import classic_opponent_catalog, find_stockfish
+from .estadisticas import WebStats, create_stats_router
 from .games import (
     GameConflictError,
     GameRecord,
@@ -50,6 +51,7 @@ from .geo.photos import PhotoSet
 from .llm import LLMProvider, get_provider
 from .llm_player import MetricsStore
 from .models import CATALOG_BY_ID, MODEL_CATALOG, build_model_providers, model_catalog, model_label
+from .partidas import chess_row
 from .quota import UsageLimiter
 from .ranking import RankingStore, chess_rival, create_ranking_router
 from .storage import ObjectStore, make_object_store
@@ -192,7 +194,17 @@ def create_app(
     _setup_telemetry()
 
     # Sin /docs ni /openapi.json: no se publica el mapa de la API.
-    app = FastAPI(title="Mea culpa", version="0.2.0", docs_url=None, redoc_url=None, openapi_url=None)
+    web_stats = WebStats(data.db, objects)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        web_stats.persist()  # al apagarse (escala a cero), las visitas en memoria pasan a Blob
+
+    app = FastAPI(
+        title="Mea culpa", version="0.2.0", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
+    )
+    app.state.web_stats = web_stats
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.cors_origins),
@@ -259,6 +271,10 @@ def create_app(
             store.save(game)
         except GameConflictError as exc:
             raise HTTPException(409, "La partida ha cambiado en otra pestaña; recárgala") from exc
+        try:
+            data.save_game(chess_row(game, time.time()))  # copia en SQL para /admin (cola en segundo plano)
+        except Exception:  # noqa: BLE001 - nunca rompe la partida
+            log.exception("No se pudo registrar la partida %s", game.id)
 
     def _opponent_move(user: User, game: GameRecord, board: chess.Board) -> None:
         model_id = game.opponent.get("model") or default_model
@@ -538,12 +554,14 @@ def create_app(
     app.include_router(create_ranking_router(current_user=current_user, ranking=ranking))
     app.state.ranking = ranking
     app.include_router(create_contact_router(data=data, settings=settings))
+    app.include_router(create_stats_router(web_stats))
     app.include_router(
         create_admin_router(
             authenticate=app.state.authenticate,
             admin_emails=settings.admin_emails,
             data=data,
             costs=azure_costs,
+            web_stats=web_stats,
             models=models,
             quota_defaults={
                 **limiter.limits,

@@ -21,3 +21,8 @@ GRANT SELECT ON dbo.schema_migraciones TO [meaculpa-api-id];
 GRANT SELECT, INSERT, UPDATE ON dbo.ranking_jugadores TO [meaculpa-api-id];
 
 GRANT SELECT, INSERT ON dbo.ranking_partidas TO [meaculpa-api-id];
+
+-- 003: partidas completas y visitas de la web.
+GRANT SELECT, INSERT, UPDATE ON dbo.partidas TO [meaculpa-api-id];
+
+GRANT SELECT, INSERT, DELETE ON dbo.visitas TO [meaculpa-api-id];
