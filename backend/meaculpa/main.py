@@ -38,6 +38,7 @@ from .datos import DataStore
 from .db import Database, mssql_connector
 from .engines import classic_opponent_catalog, find_stockfish
 from .estadisticas import WebStats, create_stats_router
+from .eval_guard import EvalBlocked, EvalGuard
 from .games import (
     GameConflictError,
     GameRecord,
@@ -106,6 +107,8 @@ class MoveRequest(BaseModel):
 
 class EvalRequest(BaseModel):
     fen: str = Field(..., min_length=10, max_length=120)
+    # Partida a la que pertenece la posición (la barra de la partida o el repaso de una terminada).
+    game_id: str | None = Field(None, max_length=64)
 
 
 class TakebackRequest(BaseModel):
@@ -229,6 +232,11 @@ def create_app(
     analysis_slots = threading.BoundedSemaphore(max(1, settings.max_concurrent_analyses))
     live = live_engine or LiveEngine(size=settings.engine_pool_size, timeout_s=settings.engine_timeout_s)
     eval_limiter = EvalRateLimiter(settings.eval_interval_ms / 1000, settings.eval_per_day)
+    eval_guard = EvalGuard(store)
+    # Partidas con una jugada en marcha en esta réplica (el rival puede tardar): si recargas la página a mitad,
+    # la partida se ve «procesando» y no se acepta otra jugada hasta que termine la primera.
+    in_flight: set[str] = set()
+    in_flight_lock = threading.Lock()
     _setup_telemetry()
 
     # Sin /docs ni /openapi.json: no se publica el mapa de la API.
@@ -281,6 +289,7 @@ def create_app(
     app.state.data = data
     app.state.live = live
     app.state.eval_limiter = eval_limiter
+    app.state.eval_guard = eval_guard
 
     def _usable(model_id: str) -> bool:
         return model_id in chess_ids and data.model_enabled(model_id)
@@ -310,7 +319,26 @@ def create_app(
         game = store.get(user.owner, game_id)  # solo busca entre las partidas del usuario
         if game is None:
             raise HTTPException(404, "Partida no encontrada")
+        eval_guard.note(game)
         return game
+
+    @contextmanager
+    def _one_move_at_a_time(game_id: str) -> Iterator[None]:
+        with in_flight_lock:
+            if game_id in in_flight:
+                raise HTTPException(409, "Tu jugada anterior aún se está procesando; espera un momento")
+            in_flight.add(game_id)
+        try:
+            yield
+        finally:
+            with in_flight_lock:
+                in_flight.discard(game_id)
+
+    def _state(game: GameRecord) -> dict[str, Any]:
+        """Estado para el navegador, con `procesando` si hay una jugada suya en marcha (tras recargar)."""
+        with in_flight_lock:
+            busy = game.id in in_flight
+        return {**game_state(game), "procesando": busy}
 
     def _save(game: GameRecord, base: dict[str, Any] | None = None) -> None:
         """Guarda con control de versión. `base`: la partida tal como se leyó (`_snapshot`).
@@ -337,6 +365,7 @@ def create_app(
                 store.save(game)
             except GameConflictError as exc2:
                 raise HTTPException(409, "La partida ha cambiado en otra pestaña; recárgala") from exc2
+        eval_guard.note(game)
         try:
             data.save_game(chess_row(game, time.time()))  # copia en SQL para /admin (cola en segundo plano)
         except Exception:  # noqa: BLE001 - nunca rompe la partida
@@ -481,12 +510,25 @@ def create_app(
             for g in store.recent(user.owner, limit=20)
         ]
 
+    @app.get(API_PREFIX + "/games/activa")
+    def active_game(user: CurrentUser) -> dict[str, Any]:
+        """La partida en curso más reciente (para retomarla al recargar o desde otro dispositivo), o null."""
+        for game in store.recent(user.owner, limit=5):
+            if game.status == "en_curso":
+                eval_guard.note(game)
+                return {"partida": _state(game)}
+        return {"partida": None}
+
     @app.get(API_PREFIX + "/games/{game_id}")
     def get_game(game_id: str, user: CurrentUser) -> dict[str, Any]:
-        return game_state(_get(user, game_id))
+        return _state(_get(user, game_id))
 
     @app.post(API_PREFIX + "/games/{game_id}/move")
     def play_move(game_id: str, req: MoveRequest, user: CurrentUser) -> dict[str, Any]:
+        with _one_move_at_a_time(game_id):
+            return _play_move(game_id, req, user)
+
+    def _play_move(game_id: str, req: MoveRequest, user: User) -> dict[str, Any]:
         game = _get(user, game_id)
         base = _snapshot(game)
         if game.status != "en_curso":
@@ -630,6 +672,10 @@ def create_app(
             raise HTTPException(429, "Demasiadas evaluaciones seguidas; espera un momento")
         if why == "diario":
             raise HTTPException(429, "Has llegado al límite diario de evaluaciones. Vuelve mañana.")
+        try:
+            eval_guard.check(user.owner, board, req.game_id)
+        except EvalBlocked as exc:
+            raise HTTPException(409, str(exc)) from exc
         terminal = terminal_payload(board)
         if terminal is not None:
             return terminal
@@ -709,6 +755,10 @@ def create_app(
     @app.post(API_PREFIX + "/games/{game_id}/takeback")
     def takeback(game_id: str, req: TakebackRequest, user: CurrentUser) -> dict[str, Any]:
         """Vuelve a una posición anterior en la que mueve el jugador (reabre la partida si había terminado)."""
+        with _one_move_at_a_time(game_id):
+            return _takeback(game_id, req, user)
+
+    def _takeback(game_id: str, req: TakebackRequest, user: User) -> dict[str, Any]:
         game = _get(user, game_id)
         if req.ply == len(game.moves) and game.status == "en_curso":
             return game_state(game)  # nada que deshacer

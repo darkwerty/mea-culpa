@@ -248,7 +248,16 @@ otro. Sin Stockfish se usa el alfa-beta propio.
   mate, `mate` = 0). `best_uci`, `best_san` y `pv_san` van siempre vacíos: la mejor jugada solo sale por `/hint`, que
   marca la partida «con ayuda». Límite por persona en memoria: de media una cada
   `EVAL_INTERVAL_MS` (150) y `EVAL_PER_DAY` (5000) al día. 422 si el FEN no vale, 429 si se pasa del límite, 503 si
-  el motor está ocupado o no responde.
+  el motor está ocupado o no responde. Con `game_id` (opcional) se dice de qué partida es la posición. Mientras
+  tengas una partida en curso sin ayudas (de las que cuentan para el ranking), solo se evalúan posiciones de su
+  historial (la actual y las anteriores) y cualquier otra da 409: si no, bastaría con evaluar cada jugada candidata
+  para saber cuál es la mejor sin pedir pista. Las posiciones de la partida de `game_id` se evalúan siempre (repasar
+  una terminada). `backend/meaculpa/eval_guard.py` guarda en memoria el historial de las partidas que pasan por la
+  API y repasa las últimas de Blob como mucho una vez por minuto y persona.
+- `GET /api/meaculpa/games/activa`: la partida en curso más reciente (`{"partida": estado | null}`), para retomarla al
+  recargar o desde otro dispositivo. El estado de `GET /games/{id}` y de esta ruta lleva `procesando: true` si hay una
+  jugada tuya en marcha en el servidor (recargaste a mitad); mientras tanto otra jugada o deshacer de esa partida da
+  409, así que recargar no sirve para repetir la jugada ni para elegir otra.
 - `POST /api/meaculpa/games/{id}/hint`: mejor jugada de la posición actual (`HINT_TIME_MS` 600, `HINT_DEPTH` 18, dos
   líneas), `eval_antes` y `eval_despues` (desde las blancas), `motivos` deducidos con python-chess y el motor, y una
   `explicacion` del LLM de la demo hecha solo con esos motivos (`fuente: "llm"`); si el LLM falla o no hay
