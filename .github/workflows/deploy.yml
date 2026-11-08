@@ -94,18 +94,8 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - name: nuxt generate (+ staticwebapp.config.json con CSP)
-        working-directory: web
-        env:
-          NUXT_PUBLIC_API_BASE: ${{ needs.infra.outputs.apiUrl }}
-          NUXT_PUBLIC_GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
-          REQUIRE_DEPLOY_CONFIG: "1"
-        run: npm ci && npm run generate
+      # La demo vive ahora en https://danielalonso.dev/meaculpa (repo de la web personal): esta SWA solo
+      # publica infra/redirect, que redirige meaculpa.danielalonso.dev con un 301.
       - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
@@ -120,6 +110,6 @@ jobs:
         with:
           azure_static_web_apps_api_token: ${{ steps.swa.outputs.token }}
           action: upload
-          app_location: web/.output/public
+          app_location: infra/redirect
           skip_app_build: true
           skip_api_build: true

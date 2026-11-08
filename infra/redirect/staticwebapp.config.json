@@ -1,0 +1,5 @@
+{
+  "routes": [
+    { "route": "/*", "redirect": "https://danielalonso.dev/meaculpa", "statusCode": 301 }
+  ]
+}
