@@ -16,3 +16,7 @@ src = ["backend"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
 ignore = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Depends() en el valor por defecto es el patrón de FastAPI (lo usa el router de geo, con dependencia inyectada).
+extend-immutable-calls = ["fastapi.Depends"]

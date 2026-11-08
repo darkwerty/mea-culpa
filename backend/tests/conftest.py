@@ -61,3 +61,33 @@ def pgn_text():
         return (PGN_DIR / name).read_text(encoding="utf-8")
 
     return _read
+
+
+@pytest.fixture
+def make_geo_client(tmp_path):
+    """API completa (create_app de Mea culpa) con fotos falsas para el router de ¿Dónde está esta foto?."""
+    from geo_support import GEO_CLIENT_ID, geo_verifier, make_photos
+
+    from meaculpa.geo.config import GeoSettings
+    from meaculpa.storage import FileObjectStore
+
+    def _make(models=None, **geo_overrides) -> TestClient:
+        settings = dataclasses.replace(
+            get_settings(),
+            google_client_id=GEO_CLIENT_ID,
+            llm_provider="mock",
+            data_dir=tmp_path / "data",
+            storage_account_url=None,
+        )
+        app = create_app(
+            settings=settings,
+            provider=MockProvider(seed=5),
+            token_verifier=geo_verifier,
+            objects=FileObjectStore(tmp_path / "store"),
+            models=models,
+            geo_settings=GeoSettings(photos_dir=tmp_path / "fotos", **geo_overrides),
+            geo_photos=make_photos(tmp_path / "fotos"),
+        )
+        return TestClient(app)
+
+    return _make

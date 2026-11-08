@@ -24,6 +24,8 @@ RUN pip install --no-cache-dir -r requirements.txt azure-monitor-opentelemetry -
 # Solo el paquete de la API: backend/dev_server.py (usuario local sin login) NO entra en la imagen.
 COPY backend/meaculpa ./backend/meaculpa
 COPY data/pgn ./data/pgn
+# Fotos de ¿Dónde está esta foto? (Wikimedia Commons, 1280 px, sin EXIF) y su manifest con solución y atribución.
+COPY data/fotos ./data/fotos
 
 RUN useradd --create-home appuser
 USER appuser

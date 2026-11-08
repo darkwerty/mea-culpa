@@ -37,6 +37,9 @@ from .games import (
     game_state,
     new_game_id,
 )
+from .geo import GEO_PREFIX, create_geo_router
+from .geo.config import GeoSettings
+from .geo.photos import PhotoSet
 from .llm import LLMProvider, get_provider
 from .llm_player import MetricsStore
 from .models import CATALOG_BY_ID, build_model_providers, model_catalog
@@ -115,10 +118,13 @@ def create_app(
     token_verifier: TokenVerifier | None = None,
     objects: ObjectStore | None = None,
     models: dict[str, LLMProvider] | None = None,
+    geo_settings: GeoSettings | None = None,
+    geo_photos: PhotoSet | None = None,
 ) -> FastAPI:
     """Crea la API. Sin GOOGLE_CLIENT_ID no arranca: todas las rutas salvo salud y modelos exigen login.
 
     `models`: rivales IA elegibles por id (por defecto, los de LLM_MODELS; sin ninguno, solo `provider`).
+    `geo_settings`, `geo_photos`: configuración y fotos de ¿Dónde está esta foto? (por defecto, entorno y data/fotos).
     """
     settings = settings or get_settings()
     if not settings.google_client_id:
@@ -376,5 +382,21 @@ def create_app(
     @app.get(API_PREFIX + "/metrics/llm")
     def llm_metrics(user: CurrentUser) -> dict[str, Any]:
         return {"resumen": metrics.summary()}
+
+    # ¿Dónde está esta foto? (danielalonso.dev/donde-esta): mismo login, almacén y cuotas, bajo /api/geo.
+    @app.get(GEO_PREFIX + "/health")
+    def geo_health() -> dict[str, Any]:
+        return {"ok": True}
+
+    app.include_router(
+        create_geo_router(
+            current_user=current_user,
+            objects=objects,
+            settings=settings,
+            models=models,
+            geo_settings=geo_settings,
+            photos=geo_photos,
+        )
+    )
 
     return app
