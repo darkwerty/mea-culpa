@@ -98,12 +98,23 @@ class StockfishAnalyzer:
         self._engine.quit()
 
 
-def make_analyzer(settings: Settings | None = None) -> AlphaBetaAnalyzer | StockfishAnalyzer:
+LONG_GAME_PLIES = 120
+
+
+def make_analyzer(settings: Settings | None = None, plies: int = 0) -> AlphaBetaAnalyzer | StockfishAnalyzer:
+    """Stockfish si está instalado; si no, nuestro alfa-beta.
+
+    En partidas muy largas (> LONG_GAME_PLIES) el alfa-beta baja un ply para que el análisis
+    no pase de unas decenas de segundos en Python puro.
+    """
     settings = settings or get_settings()
     path = find_stockfish()
     if path:
         return StockfishAnalyzer(path, settings.stockfish_depth)
-    return AlphaBetaAnalyzer(settings.analysis_depth)
+    depth = settings.analysis_depth
+    if plies > LONG_GAME_PLIES:
+        depth = max(2, depth - 1)
+    return AlphaBetaAnalyzer(depth)
 
 
 # --------------------------------------------------------------- utilidades

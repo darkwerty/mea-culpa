@@ -193,12 +193,15 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
             store.save(game)
         return game_state(game)
 
+    def _analysis_payload(game: GameRecord) -> dict[str, Any]:
+        return {"game_id": game.id, "analisis": game.analysis, **(game.diagnosis or {})}
+
     @app.post("/api/games/{game_id}/analysis")
     def analyse_game(game_id: str) -> dict[str, Any]:
         game = _get(game_id)
         if not any((i % 2 == 0) == (game.user_color == "white") for i in range(len(game.moves))):
             raise HTTPException(409, "Todavía no has hecho ninguna jugada")
-        analyzer = make_analyzer(settings)
+        analyzer = make_analyzer(settings, plies=len(game.moves))
         try:
             t0 = time.perf_counter()
             analysis = analyze_moves([chess.Move.from_uci(u) for u in game.moves], game.user_chess_color, analyzer)
@@ -210,17 +213,18 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
             game.resultado_usuario or "", "en curso"
         )
         diag = diagnose(analysis, provider, game.pgn(), result_text, history, settings=settings)
-        game.analysis = analysis.to_dict()
+        game.analysis = {**analysis.to_dict(), "motor_ms": round(engine_ms), "historial": history}
         game.patrones = analysis.patrones_partida
         game.diagnosis = asdict(diag)
         store.save(game)
-        return {
-            "game_id": game.id,
-            "analisis": game.analysis,
-            "historial": history,
-            "motor_ms": round(engine_ms),
-            **game.diagnosis,
-        }
+        return _analysis_payload(game)
+
+    @app.get("/api/games/{game_id}/analysis")
+    def get_analysis(game_id: str) -> dict[str, Any]:
+        game = _get(game_id)
+        if game.analysis is None:
+            raise HTTPException(404, "Esta partida aún no tiene análisis")
+        return _analysis_payload(game)
 
     @app.post("/api/analysis/pgn")
     def analyse_pgn(req: PgnAnalysisRequest) -> dict[str, Any]:
@@ -231,7 +235,7 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
             raise HTTPException(422, str(exc)) from exc
         moves = list(pgn_game.mainline_moves())
         color = chess.WHITE if req.user_color == "white" else chess.BLACK
-        analyzer = make_analyzer(settings)
+        analyzer = make_analyzer(settings, plies=len(moves))
         try:
             analysis = analyze_moves(moves, color, analyzer, pgn_game.board().fen())
         finally:
