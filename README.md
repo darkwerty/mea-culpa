@@ -110,6 +110,13 @@ del LLM siempre como texto (nunca `v-html`).
 - **Cuotas diarias por usuario** (persistidas en Blob, válidas para todas las réplicas): 30 partidas, 1500 jugadas,
   200 jugadas contra la IA y 20 análisis. **Fusible global** de 3000 llamadas al LLM al día (cada jugada del LLM
   reserva el peor caso, 1 + `LLM_MAX_RETRIES`). Todo configurable (`QUOTA_*`, `GLOBAL_LLM_CALLS_PER_DAY`).
+- **Partidas de Chess.com** (`backend/meaculpa/chesscom.py`, `importaciones.py`, rutas `/api/meaculpa/chesscom`): con
+  login, quien escribe su usuario trae sus partidas de los últimos 3 meses (como mucho 100, solo ajedrez estándar)
+  desde la API pública de Chess.com, en serie, con un User-Agent con la web y el contacto, sin reintentar los 429 y
+  con 30 s de tope por importación. Una importación cada 5 minutos y la cuota diaria `importaciones` (10,
+  `QUOTA_IMPORTS_PER_DAY`). Se guardan aparte (`chesscom/{owner}.json` y `chesscom-analisis/{owner}/`), solo las ve
+  su dueño, no pasan por SQL ni por los rankings y «Desconectar» las borra. El diagnóstico usa las mismas cuotas y el
+  mismo tope de gasto que el de una partida de Mea culpa.
 - **El análisis no puede tumbar la API**: como mucho 200 plies (`MAX_ANALYSIS_PLIES`) y 20 000 caracteres de PGN,
   un análisis a la vez por réplica (los demás reciben 503 en 5 s) y 90 s de tiempo máximo (`ANALYSIS_TIMEOUT_S`).
 - **Cabeceras**: la API no publica `/docs` ni `/openapi.json` y responde con `nosniff`, `frame-ancestors 'none'` y

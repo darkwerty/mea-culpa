@@ -24,6 +24,7 @@ KIND_LABELS = {
     "jugadas_llm": "jugadas contra la IA",
     "analisis": "análisis",
     "pistas": "pistas",
+    "importaciones": "importaciones de Chess.com",
 }
 
 
@@ -46,6 +47,7 @@ class UsageLimiter:
             "jugadas_llm": settings.quota_llm_moves_per_day,
             "analisis": settings.quota_analyses_per_day,
             "pistas": settings.quota_hints_per_day,
+            "importaciones": settings.quota_imports_per_day,
         }
         self.global_llm_limit = settings.global_llm_calls_per_day
         # Fusible de gasto: céntimos de dólar al día entre las dos demos (ajedrez y fotos), con lo que cuesta de

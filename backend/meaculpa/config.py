@@ -60,6 +60,7 @@ class Settings:
     quota_llm_moves_per_day: int = 200
     quota_analyses_per_day: int = 20
     quota_hints_per_day: int = 30
+    quota_imports_per_day: int = 10  # traer partidas de Chess.com
     global_llm_calls_per_day: int = 3000
     # Fusible de gasto en IA de las dos demos, en céntimos de dólar al día (50 = 0,50 USD, unos 15 al mes).
     global_llm_cents_per_day: int = 50
@@ -134,6 +135,7 @@ def get_settings() -> Settings:
         quota_llm_moves_per_day=_env_int("QUOTA_LLM_MOVES_PER_DAY", 200),
         quota_analyses_per_day=_env_int("QUOTA_ANALYSES_PER_DAY", 20),
         quota_hints_per_day=_env_int("QUOTA_HINTS_PER_DAY", 30),
+        quota_imports_per_day=_env_int("QUOTA_IMPORTS_PER_DAY", 10),
         global_llm_calls_per_day=_env_int("GLOBAL_LLM_CALLS_PER_DAY", 3000),
         global_llm_cents_per_day=_env_int("GLOBAL_LLM_CENTS_PER_DAY", 50),
         user_llm_cents_per_day=_env_int("USER_LLM_CENTS_PER_DAY", 20),

@@ -30,6 +30,7 @@ QUOTA_LABELS = {
     "jugadas_llm": "Mea culpa: jugadas contra la IA por persona y día",
     "analisis": "Mea culpa: análisis por persona y día",
     "pistas": "Mea culpa: pistas por persona y día",
+    "importaciones": "Mea culpa: veces que se traen partidas de Chess.com por persona y día",
     "llm_global": "Mea culpa: llamadas a la IA al día (todas las personas)",
     "geo_partidas": "Fotos: partidas nuevas por persona y día",
     "geo_ia": "Fotos: fotos analizadas por la IA por persona y día",

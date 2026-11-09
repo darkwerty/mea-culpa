@@ -49,6 +49,11 @@ class GameRecord:
     # Pistas o jugadas deshechas: la partida se guarda igual, pero no cuenta para el ranking.
     con_ayuda: bool = False
     ayudas: dict[str, int] = field(default_factory=lambda: {"pistas": 0, "deshacer": 0})
+    # "demo": jugada en Mea culpa; "chesscom": traída de Chess.com (solo se repasa y se analiza, no se juega ni
+    # se guarda como las demás: ver importaciones.py).
+    origen: str = "demo"
+    # Traídas de Chess.com: usuario, Elo, ritmo y enlace a la partida.
+    externo: dict[str, Any] | None = None
     etag: str | None = field(default=None, repr=False, compare=False)  # no se guarda
 
     @property
@@ -61,13 +66,16 @@ class GameRecord:
             b.push_uci(uci)
         return b
 
-    def pgn(self) -> str:
+    def pgn(self, names: bool = True) -> str:
+        """PGN de la partida. `names=False`: «Tú» y «Rival» en vez de los nombres (lo que se manda al modelo)."""
         game = chess.pgn.Game()
-        game.headers["Event"] = "Mea culpa"
+        game.headers["Event"] = "Chess.com" if self.origen == "chesscom" else "Mea culpa"
         game.headers["Date"] = time.strftime("%Y.%m.%d", time.localtime(self.created))
-        rival = self.opponent.get("nombre", self.opponent.get("type", "rival"))
-        game.headers["White"] = "Tú" if self.user_color == "white" else rival
-        game.headers["Black"] = rival if self.user_color == "white" else "Tú"
+        ext = self.externo or {}
+        me = str(ext.get("usuario") or "Tú") if names else "Tú"
+        rival = self.opponent.get("nombre", self.opponent.get("type", "rival")) if names else "Rival"
+        game.headers["White"] = me if self.user_color == "white" else rival
+        game.headers["Black"] = rival if self.user_color == "white" else me
         game.headers["Result"] = self.result
         node: chess.pgn.GameNode = game
         for uci in self.moves:
@@ -95,6 +103,11 @@ class GameStore:
 
     def save(self, game: GameRecord) -> None:
         data = {k: v for k, v in asdict(game).items() if k != "etag"}
+        # Las partidas de Mea culpa se guardan como antes, sin los campos de las importadas.
+        if data.get("origen") == "demo":
+            data.pop("origen")
+        if data.get("externo") is None:
+            data.pop("externo", None)
         raw = json.dumps(data, ensure_ascii=False, indent=1).encode("utf-8")
         key = self._key(game.owner, game.id)
         new_etag = self.objects.write(key, raw, etag=game.etag)
@@ -184,6 +197,7 @@ def game_state(game: GameRecord) -> dict[str, Any]:
     user_turn = game.status == "en_curso" and board.turn == game.user_chess_color
     return {
         "id": game.id,
+        "created": game.created,
         "fen": board.fen(),
         "turn": "white" if board.turn == chess.WHITE else "black",
         "user_color": game.user_color,
@@ -202,6 +216,8 @@ def game_state(game: GameRecord) -> dict[str, Any]:
         "pgn": game.pgn(),
         "con_ayuda": game.con_ayuda,
         "ayudas": {"pistas": int(game.ayudas.get("pistas", 0)), "deshacer": int(game.ayudas.get("deshacer", 0))},
+        "origen": game.origen,
+        "externo": game.externo,
     }
 
 

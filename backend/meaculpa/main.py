@@ -31,6 +31,7 @@ from .analysis import (
     player_result,
 )
 from .auth import TokenVerifier, User, google_verifier, make_user_dependency
+from .chesscom import ChessComClient
 from .config import Settings, get_settings
 from .contacto import create_contact_router
 from .costes_azure import AzureCosts, http_fetcher
@@ -54,6 +55,7 @@ from .geo import GEO_PREFIX, create_geo_router, geo_quota_defaults
 from .geo.config import GeoSettings, get_geo_settings
 from .geo.photos import PhotoSet
 from .hints import HintText, explain, fallback_explanation, motives
+from .importaciones import ImportStore, create_chesscom_router, to_record
 from .live import (
     EngineBusy,
     EngineFailure,
@@ -193,6 +195,7 @@ def create_app(
     database: Database | None = None,
     azure_costs: AzureCosts | None = None,
     live_engine: LiveEngine | None = None,
+    chesscom: ChessComClient | None = None,
 ) -> FastAPI:
     """Crea la API. Sin GOOGLE_CLIENT_ID no arranca: todas las rutas salvo salud y modelos exigen login.
 
@@ -201,6 +204,7 @@ def create_app(
     `database`: usuarios, uso, mensajes y controles (por defecto, Azure SQL si está configurado o SQLite).
     `azure_costs`: gasto de Azure para /admin (por defecto, Cost Management con la identidad administrada).
     `live_engine`: motor de la barra de evaluación y las pistas (por defecto, un pool de Stockfish o el alfa-beta).
+    `chesscom`: cliente de la API pública de Chess.com (por defecto, el real con requests).
     """
     settings = settings or get_settings()
     if not settings.google_client_id:
@@ -224,6 +228,7 @@ def create_app(
         )
         azure_costs = AzureCosts(fetch, settings.azure_budget_eur)
     store = GameStore(objects)
+    imports = ImportStore(objects)  # partidas traídas de Chess.com (solo las ve su dueño, nunca en rankings)
     limiter = UsageLimiter(objects, settings, overrides=data.quota)
     ranking = RankingStore(data.db, objects)
     # Modelos que juegan al ajedrez (los del catálogo marcados `ajedrez` y los de fuera del catálogo, como el mock).
@@ -570,9 +575,8 @@ def create_app(
     def _analysis_payload(game: GameRecord) -> dict[str, Any]:
         return {"game_id": game.id, "analisis": game.analysis, **(game.diagnosis or {})}
 
-    @app.post(API_PREFIX + "/games/{game_id}/analysis")
-    def analyse_game(game_id: str, user: CurrentUser) -> dict[str, Any]:
-        game = _get(user, game_id)
+    def _diagnose(user: User, game: GameRecord, previous: list[list[str]], tipo: str) -> None:
+        """Motor y LLM sobre una partida (cuotas, tope de gasto y fusible incluidos); deja el resultado en `game`."""
         if not any((i % 2 == 0) == (game.user_color == "white") for i in range(len(game.moves))):
             raise HTTPException(409, "Todavía no has hecho ninguna jugada")
         with _analysis_slot(user, len(game.moves)) as deadline:
@@ -584,10 +588,12 @@ def create_app(
                 engine_ms = (time.perf_counter() - t0) * 1000
             finally:
                 analyzer.close()
-            history = history_counts(store.previous_patterns(user.owner, game.id), analysis.patrones_partida)
+            history = history_counts(previous, analysis.patrones_partida)
             result_text = player_result(game.resultado_usuario)
+            # Al modelo nunca le llegan nombres: «Tú» y el rival (en las de Chess.com, «Rival»).
+            pgn = game.pgn(names=game.origen == "demo")
             diag = diagnose(
-                analysis, provider, game.pgn(), result_text, history, settings=settings, end_reason=game.motivo_fin
+                analysis, provider, pgn, result_text, history, settings=settings, end_reason=game.motivo_fin
             )
             limiter.add_cost(diag.coste_usd, user.owner)
             if diag.llamadas > 1:  # reintento por incoherencia con el resultado: cuenta en el fusible, sin cortar
@@ -595,7 +601,7 @@ def create_app(
                     limiter.consume_llm_calls(diag.llamadas - 1)
         _record(
             user,
-            "analisis",
+            tipo,
             ref=game.id,
             modelo=diag.modelo,
             tokens_in=diag.input_tokens,
@@ -605,8 +611,28 @@ def create_app(
         game.analysis = {**analysis.to_dict(), "motor_ms": round(engine_ms), "historial": history}
         game.patrones = analysis.patrones_partida
         game.diagnosis = asdict(diag)
+
+    @app.post(API_PREFIX + "/games/{game_id}/analysis")
+    def analyse_game(game_id: str, user: CurrentUser) -> dict[str, Any]:
+        game = _get(user, game_id)
+        _diagnose(user, game, store.previous_patterns(user.owner, game.id), "analisis")
         _save(game)
         return _analysis_payload(game)
+
+    @app.post(API_PREFIX + "/chesscom/partidas/{game_id}/analysis")
+    def analyse_imported(game_id: str, user: CurrentUser) -> dict[str, Any]:
+        """Diagnóstico de una partida traída de Chess.com: mismas cuotas y tope de gasto; nunca toca el ranking."""
+        found = imports.entry(user.owner, game_id)
+        if found is None:
+            raise HTTPException(404, "Partida no encontrada")
+        game = to_record(found[0], user.owner, found[1])
+        previous = imports.patterns(user.owner, game.id) + store.previous_patterns(user.owner, "")
+        _diagnose(user, game, previous, "analisis_chesscom")
+        payload = _analysis_payload(game)
+        imports.save_analysis(
+            user.owner, game.id, payload, (game.diagnosis or {}).get("diagnostico", {}).get("titular"), game.patrones
+        )
+        return payload
 
     @app.get(API_PREFIX + "/games/{game_id}/analysis")
     def get_analysis(game_id: str, user: CurrentUser) -> dict[str, Any]:
@@ -793,6 +819,15 @@ def create_app(
             data=data,
             ranking=ranking,
             budget=limiter,
+        )
+    )
+    app.include_router(
+        create_chesscom_router(
+            current_user=current_user,
+            imports=imports,
+            client=chesscom or ChessComClient(),
+            limiter=limiter,
+            record=_record,
         )
     )
     app.include_router(create_ranking_router(current_user=current_user, ranking=ranking))
