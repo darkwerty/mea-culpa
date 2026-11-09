@@ -90,6 +90,10 @@ class Settings:
     # Formulario de contacto: envíos por IP y día, y total de envíos al día.
     contact_per_ip_per_day: int = 5
     contact_per_day: int = 100
+    # Aviso por correo de cada mensaje (Azure Communication Services Email). Sin endpoint no se envía nada.
+    contact_mail_endpoint: str | None = None
+    contact_mail_from: str | None = None
+    contact_mail_to: str = "hola@danielalonso.dev"
     # Barra de evaluación en vivo (POST /eval): solo Stockfish, tiempo y profundidad cortos, sin base de datos.
     eval_time_ms: int = 200
     eval_depth: int = 14
@@ -154,6 +158,9 @@ def get_settings() -> Settings:
         azure_budget_eur=float(os.environ.get("AZURE_BUDGET_EUR") or "40"),
         contact_per_ip_per_day=_env_int("CONTACT_PER_IP_PER_DAY", 5),
         contact_per_day=_env_int("CONTACT_PER_DAY", 100),
+        contact_mail_endpoint=(os.environ.get("CONTACT_MAIL_ENDPOINT") or "").strip() or None,
+        contact_mail_from=(os.environ.get("CONTACT_MAIL_FROM") or "").strip() or None,
+        contact_mail_to=(os.environ.get("CONTACT_MAIL_TO") or "").strip() or "hola@danielalonso.dev",
         eval_time_ms=_env_int("EVAL_TIME_MS", 200),
         eval_depth=_env_int("EVAL_DEPTH", 14),
         eval_interval_ms=_env_int("EVAL_INTERVAL_MS", 150),

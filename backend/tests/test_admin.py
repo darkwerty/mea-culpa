@@ -372,3 +372,60 @@ def test_web_stats_do_not_wake_a_paused_database(tmp_path):
     assert stats.hit(req, {"ruta": "/"})
     stats.persist_and_maybe_flush()
     assert calls == [] and len(objects.list(PENDING_PREFIX)) == 1
+
+
+class FakeNotifier:
+    def __init__(self, fail: bool = False) -> None:
+        self.sent: list[tuple[str, str, str]] = []
+        self.fail = fail
+
+    def send(self, nombre: str, email: str, mensaje: str, ts: float) -> None:
+        if self.fail:
+            raise RuntimeError("ACS caído")
+        self.sent.append((nombre, email, mensaje))
+
+
+def _api_with(settings, notifier):
+    app = create_app(
+        settings=settings,
+        provider=MockProvider(seed=5),
+        token_verifier=verifier,
+        database=Database.sqlite(),
+        azure_costs=AzureCosts(lambda: COST_BODY, 40.0),
+        notifier=notifier,
+    )
+    return TestClient(app)
+
+
+def test_contact_sends_email_notice(settings):
+    n = FakeNotifier()
+    api = _api_with(settings, n)
+    assert api.post("/api/contacto", json=MSG).json() == {"ok": True}
+    assert n.sent == [(MSG["nombre"], MSG["email"], MSG["mensaje"])]
+    assert len(api.get("/api/admin/mensajes", headers=ADMIN_H).json()["mensajes"]) == 1
+    # Los bots del campo trampa no generan correo
+    api.post("/api/contacto", json={**MSG, "web": "http://spam.example"})
+    assert len(n.sent) == 1
+
+
+def test_contact_email_failure_keeps_message(settings):
+    api = _api_with(settings, FakeNotifier(fail=True))
+    assert api.post("/api/contacto", json=MSG).json() == {"ok": True}
+    assert len(api.get("/api/admin/mensajes", headers=ADMIN_H).json()["mensajes"]) == 1
+
+
+def test_contact_email_content_is_escaped():
+    from meaculpa.aviso import build_email
+
+    m = build_email(
+        "Ana <b>",
+        "ana@example.com",
+        "Hola\n<script>x</script>",
+        1794260000,
+        sender="s@x.net",
+        to="hola@danielalonso.dev",
+    )
+    assert m["replyTo"] == [{"address": "ana@example.com", "displayName": "Ana <b>"}]
+    assert m["recipients"]["to"] == [{"address": "hola@danielalonso.dev"}]
+    assert "<script>" not in m["content"]["html"] and "&lt;script&gt;" in m["content"]["html"]
+    assert "Hola\n<script>x</script>" in m["content"]["plainText"]

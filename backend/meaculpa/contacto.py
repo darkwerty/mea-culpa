@@ -5,17 +5,20 @@
 - Límites por IP y día y total diario (la IP solo se usa como hash del día en un contador que se borra al día
   siguiente).
 - Los mensajes se borran a los 12 meses (datos.MESSAGE_RETENTION_S).
+- Si hay `notifier`, cada mensaje guardado se avisa además por correo, después de responder (aviso.py).
 """
 
 from __future__ import annotations
 
 import re
+import time
 import unicodedata
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
+from .aviso import ContactNotifier, notify_safely
 from .config import Settings
 from .datos import DataStore
 from .db import DatabaseUnavailable
@@ -73,11 +76,11 @@ def client_ip(request: Request) -> str:
     return request.client.host if request.client else "desconocida"
 
 
-def create_contact_router(*, data: DataStore, settings: Settings) -> APIRouter:
+def create_contact_router(*, data: DataStore, settings: Settings, notifier: ContactNotifier | None = None) -> APIRouter:
     router = APIRouter()
 
     @router.post("/api/contacto")
-    def contact(body: ContactIn, request: Request) -> dict[str, Any]:
+    def contact(body: ContactIn, request: Request, background: BackgroundTasks) -> dict[str, Any]:
         if body.web.strip():
             return {"ok": True}  # bot: misma respuesta, nada guardado
         try:
@@ -88,6 +91,8 @@ def create_contact_router(*, data: DataStore, settings: Settings) -> APIRouter:
             raise HTTPException(
                 503, "No se ha podido enviar ahora mismo. Prueba en un minuto o escríbeme a hola@danielalonso.dev."
             ) from exc
+        if notifier is not None:
+            background.add_task(notify_safely, notifier, body.nombre, body.email, body.mensaje, time.time())
         return {"ok": True}
 
     return router

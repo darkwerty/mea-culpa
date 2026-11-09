@@ -13,6 +13,7 @@
 //   - Container Apps (plan Consumption) para la API, con escalado a cero
 //   - Static Web App (Free) para el frontend (opcional) y, en un segundo despliegue, su dominio propio
 //   - Presupuesto mensual con alertas por correo
+//   - Azure Communication Services Email (email.bicep) para avisar por correo de los mensajes de contacto
 //
 // Uso (lo normal es que lo lance .github/workflows/deploy.yml):
 //   GOOGLE_CLIENT_ID=<id>.apps.googleusercontent.com az deployment group create -g rg-mea-culpa \
@@ -103,6 +104,9 @@ param sqlDatabaseName string = 'meaculpa'
 
 @description('Correos de Google con acceso al panel /admin (separados por comas)')
 param adminEmails string = 'admin@example.com'
+
+@description('A dónde llega el aviso de cada mensaje del formulario de contacto')
+param contactMailTo string = 'hola@danielalonso.dev'
 
 var suffix = uniqueString(resourceGroup().id)
 var foundryName = foundryAccountName
@@ -304,6 +308,16 @@ resource containerEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
   }
 }
 
+// ---------------------------------------------------------------- aviso por correo del formulario de contacto
+module email 'email.bicep' = {
+  name: 'email'
+  params: {
+    prefix: prefix
+    suffix: suffix
+    apiPrincipalId: apiIdentity.properties.principalId
+  }
+}
+
 resource api 'Microsoft.App/containerApps@2024-03-01' = {
   name: '${prefix}-api'
   location: location
@@ -362,6 +376,10 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = {
             // Panel /admin: gasto del mes con Cost Management (rol Cost Management Reader sobre la suscripción).
             { name: 'AZURE_SUBSCRIPTION_ID', value: subscription().subscriptionId }
             { name: 'ADMIN_EMAILS', value: adminEmails }
+            // Aviso por correo de cada mensaje de contacto (ACS Email con la identidad administrada).
+            { name: 'CONTACT_MAIL_ENDPOINT', value: email.outputs.endpoint }
+            { name: 'CONTACT_MAIL_FROM', value: email.outputs.sender }
+            { name: 'CONTACT_MAIL_TO', value: contactMailTo }
           ]
         }
       ]

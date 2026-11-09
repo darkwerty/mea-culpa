@@ -5,6 +5,7 @@ annotated-types==0.8.0
 anthropic==2.6.0
 anyio==4.16.0
 asgiref==3.13.0
+azure-communication-email==1.1.0
 azure-core==1.41.0
 azure-core-tracing-opentelemetry==1.0.0b13
 azure-identity==1.27.0

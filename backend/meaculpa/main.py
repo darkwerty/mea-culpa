@@ -31,6 +31,7 @@ from .analysis import (
     player_result,
 )
 from .auth import TokenVerifier, User, google_verifier, make_user_dependency
+from .aviso import AcsNotifier, ContactNotifier
 from .chesscom import ChessComClient
 from .config import Settings, get_settings
 from .contacto import create_contact_router
@@ -196,6 +197,7 @@ def create_app(
     azure_costs: AzureCosts | None = None,
     live_engine: LiveEngine | None = None,
     chesscom: ChessComClient | None = None,
+    notifier: ContactNotifier | None = None,
 ) -> FastAPI:
     """Crea la API. Sin GOOGLE_CLIENT_ID no arranca: todas las rutas salvo salud y modelos exigen login.
 
@@ -205,6 +207,7 @@ def create_app(
     `azure_costs`: gasto de Azure para /admin (por defecto, Cost Management con la identidad administrada).
     `live_engine`: motor de la barra de evaluación y las pistas (por defecto, un pool de Stockfish o el alfa-beta).
     `chesscom`: cliente de la API pública de Chess.com (por defecto, el real con requests).
+    `notifier`: aviso por correo de los mensajes de contacto (por defecto, ACS Email si está configurado).
     """
     settings = settings or get_settings()
     if not settings.google_client_id:
@@ -832,7 +835,14 @@ def create_app(
     )
     app.include_router(create_ranking_router(current_user=current_user, ranking=ranking))
     app.state.ranking = ranking
-    app.include_router(create_contact_router(data=data, settings=settings))
+    if notifier is None and settings.contact_mail_endpoint and settings.contact_mail_from:
+        notifier = AcsNotifier(
+            settings.contact_mail_endpoint,
+            settings.contact_mail_from,
+            settings.contact_mail_to,
+            _azure_credential(settings),
+        )
+    app.include_router(create_contact_router(data=data, settings=settings, notifier=notifier))
     app.include_router(create_stats_router(web_stats))
     app.include_router(
         create_admin_router(

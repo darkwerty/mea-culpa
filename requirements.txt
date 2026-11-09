@@ -9,3 +9,4 @@ azure-storage-blob>=12.25  # partidas y cuotas en Blob con identidad administrad
 google-auth>=2.40  # verificación del ID token de Google Identity Services
 requests>=2.32  # transporte de google-auth para descargar las claves públicas de Google
 pyodbc>=5.2  # Azure SQL con ODBC Driver 18 y token de Entra de la identidad administrada
+azure-communication-email>=1.1  # aviso por correo de los mensajes del formulario de contacto
