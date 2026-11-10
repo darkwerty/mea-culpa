@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from .auth import User
+from .contacto import ContactInbox
 from .costes_azure import AzureCosts
 from .datos import DEMOS, DataStore
 from .db import DatabaseUnavailable
@@ -69,6 +70,7 @@ def create_admin_router(
     models: dict[str, LLMProvider],
     quota_defaults: dict[str, int],
     web_stats: WebStats | None = None,
+    inbox: ContactInbox | None = None,
 ) -> APIRouter:
     allowed = {e.strip().lower() for e in admin_emails if e.strip()}
 
@@ -119,8 +121,14 @@ def create_admin_router(
     def me(user: User = Depends(admin_user)) -> dict[str, Any]:
         return {"email": user.email, "nombre": user.name}
 
+    def flush_inbox() -> None:
+        """Mensajes del formulario que siguen en el buzón rápido porque la base de datos estaba dormida."""
+        if inbox is not None:
+            inbox.flush()
+
     @router.get("/resumen")
     def summary() -> dict[str, Any]:
+        flush_inbox()
         with database():
             return data.summary()
 
@@ -174,6 +182,7 @@ def create_admin_router(
 
     @router.get("/mensajes")
     def messages() -> dict[str, Any]:
+        flush_inbox()
         with database():
             return {"mensajes": data.messages()}
 

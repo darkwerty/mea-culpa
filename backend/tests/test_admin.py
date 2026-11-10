@@ -429,3 +429,34 @@ def test_contact_email_content_is_escaped():
     assert m["recipients"]["to"] == [{"address": "hola@danielalonso.dev"}]
     assert "<script>" not in m["content"]["html"] and "&lt;script&gt;" in m["content"]["html"]
     assert "Hola\n<script>x</script>" in m["content"]["plainText"]
+
+
+def test_contact_answers_while_the_database_sleeps(settings, monkeypatch):
+    """El formulario no espera a la base de datos: responde, avisa por correo y el mensaje pasa después."""
+    from meaculpa.datos import DataStore
+    from meaculpa.db import DatabaseUnavailable
+
+    awake = DataStore.add_message
+
+    def asleep(self, *args, **kwargs):
+        raise DatabaseUnavailable("en pausa")
+
+    monkeypatch.setattr(DataStore, "add_message", asleep)
+    n = FakeNotifier()
+    api = _api_with(settings, n)
+    assert api.post("/api/contacto", json=MSG).json() == {"ok": True}
+    assert n.sent == [(MSG["nombre"], MSG["email"], MSG["mensaje"])]
+
+    monkeypatch.setattr(DataStore, "add_message", awake)  # despierta: al abrir /admin pasa a la base de datos
+    msgs = api.get("/api/admin/mensajes", headers=ADMIN_H).json()["mensajes"]
+    assert [m["email"] for m in msgs] == [MSG["email"]]
+    assert len(api.get("/api/admin/mensajes", headers=ADMIN_H).json()["mensajes"]) == 1  # sin duplicados
+
+
+def test_add_message_with_same_id_is_not_duplicated(settings):
+    from meaculpa.datos import DataStore
+
+    data = DataStore(Database.sqlite())
+    data.add_message("Ana", "ana@example.com", "Hola, un mensaje de prueba.", msg_id="a" * 32, ts=1.0e9)
+    data.add_message("Ana", "ana@example.com", "Hola, un mensaje de prueba.", msg_id="a" * 32, ts=1.0e9)
+    assert len(data.messages()) == 1

@@ -202,12 +202,19 @@ class DataStore:
 
         return bool(self.db.run(job, retries=3))
 
-    def add_message(self, nombre: str, email: str, mensaje: str) -> str:
-        msg_id = uuid.uuid4().hex
-        ts = self.clock()
+    def add_message(
+        self, nombre: str, email: str, mensaje: str, *, msg_id: str | None = None, ts: float | None = None
+    ) -> str:
+        """Guarda un mensaje. Con `msg_id` (los que llegan del buzón rápido) no se duplica si ya estaba."""
+        msg_id = msg_id or uuid.uuid4().hex
+        ts = self.clock() if ts is None else ts
+        now = self.clock()
 
         def job(cur: Any) -> None:
-            cur.execute("DELETE FROM mensajes WHERE ts < ?", (ts - MESSAGE_RETENTION_S,))  # conservación: 12 meses
+            cur.execute("DELETE FROM mensajes WHERE ts < ?", (now - MESSAGE_RETENTION_S,))  # conservación: 12 meses
+            cur.execute("SELECT 1 FROM mensajes WHERE id = ?", (msg_id,))
+            if cur.fetchone():
+                return
             cur.execute(
                 "INSERT INTO mensajes (id, ts, nombre, email, mensaje, leido) VALUES (?, ?, ?, ?, ?, 0)",
                 (msg_id, ts, nombre, email, mensaje),

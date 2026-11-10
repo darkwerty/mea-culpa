@@ -34,7 +34,7 @@ from .auth import TokenVerifier, User, google_verifier, make_user_dependency
 from .aviso import AcsNotifier, ContactNotifier
 from .chesscom import ChessComClient
 from .config import Settings, get_settings
-from .contacto import create_contact_router
+from .contacto import ContactInbox, create_contact_router
 from .costes_azure import AzureCosts, http_fetcher
 from .datos import DataStore
 from .db import Database, mssql_connector
@@ -842,7 +842,9 @@ def create_app(
             settings.contact_mail_to,
             _azure_credential(settings),
         )
-    app.include_router(create_contact_router(data=data, settings=settings, notifier=notifier))
+    # Buzón rápido: el formulario responde en cuanto el mensaje está en Blob, sin esperar a la base de datos
+    inbox = ContactInbox(objects, data)
+    app.include_router(create_contact_router(data=data, settings=settings, notifier=notifier, inbox=inbox))
     app.include_router(create_stats_router(web_stats))
     app.include_router(
         create_admin_router(
@@ -851,6 +853,7 @@ def create_app(
             data=data,
             costs=azure_costs,
             web_stats=web_stats,
+            inbox=inbox,
             models=models,
             quota_defaults={
                 **limiter.limits,
