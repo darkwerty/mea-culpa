@@ -34,6 +34,7 @@ param apiMaxReplicas = 1
 
 param budgetAmount = 10
 param budgetStartDate = '2026-11-01'
-param budgetEmails = [
-  'admin@example.com'
-]
+// Correos fuera del repositorio: ADMIN_EMAILS (acceso a /admin) y BUDGET_EMAILS (avisos del presupuesto), separados
+// por comas
+param adminEmails = readEnvironmentVariable('ADMIN_EMAILS')
+param budgetEmails = split(readEnvironmentVariable('BUDGET_EMAILS'), ',')

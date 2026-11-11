@@ -103,7 +103,7 @@ param sqlServerName string = 'meaculpa-sql-fc'
 param sqlDatabaseName string = 'meaculpa'
 
 @description('Correos de Google con acceso al panel /admin (separados por comas)')
-param adminEmails string = 'admin@example.com'
+param adminEmails string
 
 @description('A dónde llega el aviso de cada mensaje del formulario de contacto')
 param contactMailTo string = 'hola@danielalonso.dev'

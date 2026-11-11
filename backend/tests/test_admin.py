@@ -107,7 +107,7 @@ def test_admin_email_must_be_verified(api):
 
 
 def test_admin_email_case_insensitive_and_allowed(api):
-    res = api.get("/api/admin/yo", headers=tok("dani", "admin@example.com"))
+    res = api.get("/api/admin/yo", headers=tok("dani", "Admin@Example.COM"))  # sin distinguir mayúsculas
     assert res.status_code == 200 and res.json()["email"] == ADMIN
 
 

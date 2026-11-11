@@ -8,7 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-DEFAULT_ADMIN_EMAILS = ("admin@example.com",)
+DEFAULT_ADMIN_EMAILS: tuple[str, ...] = ()  # sin ADMIN_EMAILS no entra nadie en /admin
 
 
 def _env_bool(name: str, default: bool) -> bool:

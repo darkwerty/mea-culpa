@@ -24,6 +24,7 @@ def settings(tmp_path):
         llm_provider="mock",
         google_client_id=TEST_CLIENT_ID,
         storage_account_url=None,
+        admin_emails=("admin@example.com",),
     )
 
 

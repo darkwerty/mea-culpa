@@ -1,8 +1,8 @@
 """Panel de administración (danielalonso.dev/admin): endpoints bajo /api/admin.
 
 Acceso: ID token de Google verificado (firma, audiencia, caducidad y email_verified, como el resto de la API) y
-correo en la lista blanca ADMIN_EMAILS (por defecto, solo admin@example.com). Sin token: 401; con el token de
-cualquier otra cuenta: 403.
+correo en la lista blanca ADMIN_EMAILS (variable de entorno; sin ella no entra nadie). Sin token: 401; con el token
+de cualquier otra cuenta: 403.
 """
 
 from __future__ import annotations

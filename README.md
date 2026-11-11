@@ -373,8 +373,8 @@ export STOCKFISH_PATH="C:/.../stockfish-windows-x86-64-universal.exe"   # o 'sto
   **visitas de la web sin cookies** (`visitas`, `POST /api/stats/visita`: ruta, dominio de procedencia, país por zona
   horaria, dispositivo y un hash diario con sal en memoria; 12 meses). Las visitas no despiertan la base de datos:
   esperan en Blob (`stats/pendiente/`) hasta que está despierta por otra cosa o, como mucho, una vez al día.
-- **Presupuesto mensual** (desde 2026-11-01) con alertas al 50 % y 90 % (real) y al 100 % (previsto) a
-  admin@example.com.
+- **Presupuesto mensual** (desde 2026-11-01) con alertas al 50 % y 90 % (real) y al 100 % (previsto) a los
+  correos de `BUDGET_EMAILS`.
 
 La imagen (`Dockerfile`, dependencias fijadas con `constraints.txt`) se construye en la nube con `az acr build` y se
 guarda en el ACR del grupo. `.github/workflows/ci.yml` (permisos de solo lectura, acciones fijadas por SHA)
