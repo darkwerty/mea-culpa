@@ -222,6 +222,7 @@ def create_app(
     default_model = settings.llm_default_model if settings.llm_default_model in models else next(iter(models))
     objects = objects or make_object_store(settings)
     data = DataStore(database or make_database(settings))
+    data.prefetch()  # la configuración (y la base de datos, si estaba pausada) se va despertando ya
     geo_settings = geo_settings or get_geo_settings()
     if azure_costs is None:
         fetch = (

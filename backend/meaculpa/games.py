@@ -6,6 +6,7 @@ import json
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -16,6 +17,9 @@ from .engines import GreedyOpponent, MinimaxOpponent, RandomOpponent, StockfishO
 from .llm.base import LLMProvider
 from .llm_player import LLMOpponent, MetricsStore
 from .storage import ObjectStore
+
+# Lecturas de partidas en paralelo (son E/S: peticiones a Blob). Compartido por todas las peticiones.
+_READS = ThreadPoolExecutor(max_workers=8, thread_name_prefix="partidas")
 
 _HEX = re.compile(r"^[0-9a-f]{12,64}$")
 
@@ -133,11 +137,14 @@ class GameStore:
         if not _HEX.match(owner):
             raise ValueError("Identificador no válido")
         listed = sorted(self.objects.list(f"games/{owner}"), key=lambda kv: kv[1], reverse=True)[:limit]
-        games = []
-        for key, _ in listed:
-            game = self.get(owner, key.rsplit("/", 1)[-1].removesuffix(".json"))
-            if game:
-                games.append(game)
+        ids = [key.rsplit("/", 1)[-1].removesuffix(".json") for key, _ in listed]
+        # En Blob cada lectura es una petición HTTP: en paralelo, la lista tarda lo que la más lenta
+        found = (
+            _READS.map(lambda gid: self.get(owner, gid), ids)
+            if len(ids) > 1
+            else map(lambda gid: self.get(owner, gid), ids)
+        )
+        games = [g for g in found if g]
         return sorted(games, key=lambda g: g.created, reverse=True)
 
     def previous_patterns(self, owner: str, exclude_id: str) -> list[list[str]]:

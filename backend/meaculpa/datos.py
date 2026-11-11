@@ -3,6 +3,8 @@
 Las partidas siguen en Blob (storage.py); aquí solo va lo que el panel necesita para contar y decidir.
 Todo lo que se consulta en cada petición (bloqueos y configuración) se cachea en memoria unos segundos y, si la
 base de datos no responde, se usa lo último conocido o el valor por defecto: las demos nunca dependen de ella.
+En Azure SQL esas lecturas van en un hilo aparte y la petición no las espera (salvo la primera vez, como mucho
+FIRST_WAIT s): la base de datos serverless se pausa sola y conectar con ella dormida tarda hasta el timeout.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ def _num(value: Any) -> float:
 class DataStore:
     CONFIG_TTL = 60.0  # s que vale la configuración en memoria
     USER_TTL = 120.0  # s entre comprobaciones del bloqueo (y escrituras de última visita) de un usuario
+    FIRST_WAIT = 1.5  # s que espera la primera lectura (con la base de datos despierta llega antes)
 
     def __init__(self, db: Database, clock=time.time) -> None:
         self.db = db
@@ -41,7 +44,31 @@ class DataStore:
         self._lock = threading.Lock()
         self._config: dict[str, str] = {}
         self._config_at = -1e9
+        self._config_waited = False
         self._users: dict[str, tuple[bool, float]] = {}
+        self._threads: dict[str, threading.Thread] = {}
+
+    def _refresh(self, key: str, load: Any, wait: float) -> None:
+        """Ejecuta `load` en un hilo (uno por clave a la vez) y espera como mucho `wait` s.
+
+        Con SQLite (local y tests) se ejecuta en el momento: no hay pausa que esperar y los tests son deterministas.
+        """
+        if not getattr(self.db, "background", False):
+            load()
+            return
+        with self._lock:
+            thread = self._threads.get(key)
+            if thread is None or not thread.is_alive():
+                thread = threading.Thread(target=load, name=f"datos-{key}", daemon=True)
+                self._threads[key] = thread
+                thread.start()
+        if wait > 0:
+            thread.join(wait)
+
+    def prefetch(self) -> None:
+        """Al arrancar: empieza a leer la configuración (y a despertar la base de datos) sin esperar."""
+        if getattr(self.db, "background", False) and self._config_at < 0:
+            self._refresh("config", self._load_config, 0)
 
     # ---------------------------------------------------------------- usuarios
     def touch_user(self, owner: str, email: str | None, name: str | None) -> bool:
@@ -49,16 +76,25 @@ class DataStore:
         now = time.monotonic()
         with self._lock:
             cached = self._users.get(owner)
-        if cached and now - cached[1] < self.USER_TTL:
-            return cached[0]
-        blocked = cached[0] if cached else False
-        try:
-            rows = self.db.query("SELECT bloqueado FROM usuarios WHERE owner = ?", (owner,))
-            blocked = bool(rows[0]["bloqueado"]) if rows else False
-        except DatabaseUnavailable:
-            pass
+            if cached and now - cached[1] < self.USER_TTL:
+                return cached[0]
+            previous = cached[0] if cached else False
+            # Mientras se comprueba, el resto de peticiones usa el último valor conocido (sin esperar)
+            self._users[owner] = (previous, now)
+
+        def load() -> None:
+            blocked = previous
+            try:
+                rows = self.db.query("SELECT bloqueado FROM usuarios WHERE owner = ?", (owner,))
+                blocked = bool(rows[0]["bloqueado"]) if rows else False
+            except DatabaseUnavailable:
+                pass
+            with self._lock:
+                self._users[owner] = (blocked, time.monotonic())
+
+        self._refresh(f"usuario:{owner}", load, 0 if cached else self.FIRST_WAIT)
         with self._lock:
-            self._users[owner] = (blocked, now)
+            blocked = self._users[owner][0]
         ts = self.clock()
         email = (email or "")[:320] or None
         name = (name or "")[:60] or None
@@ -137,16 +173,20 @@ class DataStore:
         )
 
     # ---------------------------------------------------------------- configuración (controles)
-    def config(self) -> dict[str, str]:
-        now = time.monotonic()
-        if now - self._config_at < self.CONFIG_TTL:
-            return self._config
+    def _load_config(self) -> None:
         try:
             rows = self.db.query("SELECT clave, valor FROM config")
             self._config = {r["clave"]: r["valor"] for r in rows}
         except DatabaseUnavailable:
             pass  # lo último conocido (o nada: valores por defecto)
-        self._config_at = now
+        self._config_at = time.monotonic()
+
+    def config(self) -> dict[str, str]:
+        if time.monotonic() - self._config_at < self.CONFIG_TTL:
+            return self._config
+        first = not self._config_waited
+        self._config_waited = True
+        self._refresh("config", self._load_config, self.FIRST_WAIT if first else 0)
         return self._config
 
     def set_config(self, key: str, value: str) -> None:
@@ -158,10 +198,13 @@ class DataStore:
                 cur.execute("INSERT INTO config (clave, valor, actualizado) VALUES (?, ?, ?)", (key, value, ts))
 
         self.db.run(job)
-        self._config_at = -1e9  # se relee en la próxima consulta
+        # Se ve ya en memoria (la relectura de la próxima consulta puede ir en segundo plano)
+        self._config = {**self._config, key: value}
+        self._config_at = -1e9
 
     def delete_config(self, key: str) -> None:
         self.db.execute("DELETE FROM config WHERE clave = ?", (key,))
+        self._config = {k: v for k, v in self._config.items() if k != key}
         self._config_at = -1e9
 
     def demo_enabled(self, demo: str) -> bool:
