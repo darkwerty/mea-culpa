@@ -6,7 +6,7 @@ Un entrenador de ajedrez que, al acabar la partida, te dice **en castellano y si
 no se lo inventa: un motor de ajedrez encuentra los errores y un LLM desplegado en **Microsoft Foundry** solo los
 explica.
 
-![Diagnóstico tras una partida contra el minimax](docs/diagnostico.png)
+![Diagnóstico de una partida perdida contra Stockfish: GPT-4.1 mini en Foundry explica los errores que encontró el motor](docs/diagnostico.png)
 
 ## El problema
 
@@ -25,7 +25,7 @@ El script de evaluación está listo para repetirse contra un modelo real de Fou
 
 | Qué | Resultado |
 |---|---|
-| Tests | **135 tests en verde** (`pytest`; 134 + 1 que solo corre con Stockfish instalado): validación de jugadas, reintentos/fallback, modo experimento (derrota por ilegalidad), tope de gasto, extracción de jugadas en texto, proveedores Azure OpenAI, Claude en Foundry y Ollama con red simulada, Stockfish como ancla, aperturas, Elo por máxima verosimilitud y torneo de punta a punta, mates en 1 y 2, detección de errores, validación de la salida del LLM, API, cliente de Azure con red simulada, login con Google (tokens firmados de prueba), aislamiento entre usuarios, cuotas y almacén Blob simulado |
+| Tests | **316 tests en verde** (`pytest`; alguno solo corre con Stockfish instalado): validación de jugadas, reintentos/fallback, modo experimento (derrota por ilegalidad), tope de gasto, extracción de jugadas en texto, proveedores Azure OpenAI, Claude en Foundry y Ollama con red simulada, Stockfish como ancla, aperturas, Elo por máxima verosimilitud y torneo de punta a punta, mates en 1 y 2, detección de errores, validación de la salida del LLM, API, cliente de Azure con red simulada, login con Google (tokens firmados de prueba), aislamiento entre usuarios, cuotas y almacén Blob simulado |
 | Detección de errores en partidas históricas | En las miniaturas, la mayor caída del motor es el error clásico: **5…Bxd1??** en el mate de Légal, **2.g4??** en el mate del loco, **3…Nf6??** en el del pastor. En las partidas largas, el alfa-beta a profundidad 3 no siempre coincide con el análisis histórico (en la Siempreviva marca 7…d3 y no 19…Qxf3); con Stockfish sería más fiable |
 | Jugadas ilegales del LLM (mock) | 4,8 % a temperatura 0 · 24,5 % a 0,7 · 48,1 % a 1,2 — sin una sola jugada ilegal en el tablero gracias a la validación con python-chess |
 | Coste por diagnóstico | ~750 tokens de entrada + ~200 de salida ≈ **0,0005 $** con precios tipo gpt-4.1-mini (estimado; configurable) |
@@ -53,26 +53,27 @@ flowchart LR
     API -.->|métricas: ilegales por<br/>modelo y temperatura| M[(JSONL)]
 ```
 
-\* Stockfish solo aparece si ya está instalado (ver abajo).
+\* Stockfish va instalado en la imagen Docker; en local solo aparece si lo encuentra (ver abajo).
 
 ### Dos formas de jugar
 
 1. **Tú contra una IA de Foundry.** Un modelo de chat elige sus jugadas. Cada propuesta pasa por python-chess: si es
    ilegal o no se entiende, se le devuelve el error («'Ke9' es ilegal en esta posición») y vuelve a intentarlo, hasta
    `LLM_MAX_RETRIES` veces (3 por defecto). Si sigue fallando, se juega una jugada legal de respaldo y queda apuntado.
-   Cada intento se registra para medir **cuántas jugadas ilegales propone cada modelo a cada temperatura**; la página
-   lo muestra en una tabla. Opcionalmente se le puede dar la lista de jugadas legales para comparar.
+   Cada intento se registra para medir **cuántas jugadas ilegales propone cada modelo a cada temperatura**
+   (`GET /api/meaculpa/metrics/llm`), y la página avisa cuando el modelo ha necesitado más de un intento. Por la API
+   también se le puede dar la lista de jugadas legales para comparar.
 2. **Tú contra algoritmos clásicos**, de menos a más fuerte:
    - *Aleatorio*: cualquier jugada legal.
    - *Codicioso*: captura lo más valioso que pueda (y da mate en una si lo ve).
    - *Minimax alfa-beta*: negamax con poda alfa-beta, profundización iterativa, quiescencia sobre capturas, tabla de
      transposiciones, ordenación MVV-LVA + killer moves y evaluación de material + tablas pieza-casilla. Profundidad
      configurable (1–4).
-   - *Stockfish* con nivel 0–20, **solo si hay un binario `stockfish` en el PATH o en `STOCKFISH_PATH`**. El proyecto no
-     descarga binarios; si no lo encuentra, la opción no aparece (en este equipo no estaba instalado, así que esa parte
-     no se ha probado).
+   - *Stockfish* con nivel 0 a 20. La imagen Docker lo instala con el paquete `stockfish` de Debian; en local se usa
+     el binario del PATH o de `STOCKFISH_PATH`, y si no lo encuentra la opción no aparece. El proyecto no descarga
+     binarios.
 
-![Rival LLM proponiendo una jugada ilegal y corrigiéndose](docs/rival-llm.png)
+![Partida contra Llama 3.3 70B en Foundry: su última jugada necesitó dos intentos para ser legal](docs/rival-llm.png)
 
 ### El análisis «mea culpa»
 
@@ -95,6 +96,8 @@ principal: sin comentarios, sin variantes y sin cabeceras de texto libre (`Event
 otra vía de inyección; solo se conservan `FEN`/`SetUp` (validados por python-chess) y `Result` (lista cerrada). El
 prompt de sistema dice además que cualquier instrucción dentro de los datos se ignora, y la interfaz pinta la salida
 del LLM siempre como texto (nunca `v-html`).
+
+<img src="docs/movil.png" alt="El mismo diagnóstico en el móvil" width="300">
 
 ## Seguridad y límites de la demo pública
 
@@ -204,7 +207,8 @@ en local usa tu `az login` y en Azure la identidad administrada (`AZURE_CLIENT_I
 Las llamadas usan `chat.completions.parse(response_format=<modelo pydantic>)`.
 
 Los tests comprueban este cliente sin red: un transporte HTTP falso verifica la URL, la cabecera `Authorization: Bearer`,
-el `response_format` JSON Schema y el parseo. **No se ha probado contra un recurso real de Azure.**
+el `response_format` JSON Schema y el parseo. En producción corre contra el recurso real de Foundry con la identidad
+administrada.
 
 Selector de modelo del rival IA: `GET /api/meaculpa/models` (ajedrez) y `GET /api/geo/models` (fotos, solo los que
 aceptan imágenes) devuelven el catálogo de `backend/meaculpa/models.py` con `disponible`, `fabricante` y `razona` (los
@@ -348,8 +352,8 @@ export STOCKFISH_PATH="C:/.../stockfish-windows-x86-64-universal.exe"   # o 'sto
 - **Recurso de Microsoft Foundry existente** (`foundryAccountName`, hoy `meaculpa-fc-7952`, creado para el experimento,
   con `disableLocalAuth`): el Bicep no lo crea, solo le añade el **deployment del modelo** (`gpt-4.1-mini`,
   GlobalStandard, 10K TPM; parametrizable). `gpt-6-luna` no tiene cuota en la suscripción (0 TPM).
-- **Azure Container Registry Basic** (sin usuario admin) para la imagen de la API: el repo es privado, así que GHCR
-  obligaría a dar credenciales a Container Apps. La app tira de la imagen con su identidad administrada (*AcrPull*).
+- **Azure Container Registry Basic** (sin usuario admin) para la imagen de la API: se eligió cuando el repo era
+  privado, porque GHCR obligaba a dar credenciales a Container Apps. La app tira de la imagen con su identidad administrada (*AcrPull*).
 - **Storage account** (Standard_LRS, sin claves compartidas ni acceso público) con un contenedor para partidas y
   cuotas; los contadores diarios se borran solos a los 30 días.
 - **Identidad administrada** asignada por el usuario con *Cognitive Services OpenAI User* sobre Foundry y *Storage
@@ -479,19 +483,16 @@ al LLM, los 10K TPM del deployment y el escalado máximo a 1 réplica. (El Stora
 
 ## Qué falta
 
-- **No se ha probado contra Azure real**: ni el modelo de Foundry, ni el despliegue Bicep, ni Blob Storage, ni el
-  login con un cliente OAuth real (los tests usan tokens firmados con una clave de prueba). La imagen Docker sí se
-  construye y arranca en local. Las cifras de calidad del LLM están por medir.
-- Stockfish 19 ya está instalado (winget) y el ancla del experimento se ha probado con él; el rival de la demo y el analizador con Stockfish siguen sin probar a fondo. Winget no creó el alias `stockfish` en `%LOCALAPPDATA%/Microsoft/WinGet/Links`: hay que definir `STOCKFISH_PATH`.
-- Los proveedores Azure OpenAI y Claude en Foundry solo se han probado con red simulada; Ollama, contra un servidor local real.
+- Las cifras de calidad del diagnóstico (coincidencia con el motor, errores inventados) solo están medidas en mock:
+  falta repetir `evaluate.py` contra los modelos de Foundry.
+- El proveedor de Claude en Foundry solo se ha probado con red simulada, porque la suscripción no tiene cuota para
+  Claude. Ollama se ha probado contra un servidor local real.
 - El análisis con el motor propio puede tardar ~30 s en partidas largas; se podría paralelizar por posiciones o pasar a Stockfish.
 - Las métricas de jugadas ilegales del LLM (`llm_moves.jsonl`) siguen en disco local: en Container Apps se pierden
   al escalar a cero. No contienen datos de usuarios.
 - El límite de un análisis simultáneo es por réplica, no global.
 - Las etiquetas de patrones son heurísticas sencillas (no detectan clavadas, horquillas, debilidades de peones…).
-- El frontend no tiene arrastrar y soltar ni reloj; la promoción se elige con un selector simple.
-- La CI y el despliegue (`.github/workflows/`) están escritos pero el repo aún no tiene remoto, así que nunca se han
-  ejecutado en GitHub.
+- Las partidas no tienen reloj.
 
 ## Estructura
 
